@@ -115,3 +115,42 @@ class PrivacyEngine:
     def to(self, device):
         self.device = device
         return self
+
+
+class DynamicPrivacyEngine(PrivacyEngine):
+    def __init__(
+        self,
+        module: nn.Module,
+        batch_size: int,
+        sample_size: int,
+        alphas: List[float],
+        initial_noise_multiplier: float,
+        max_grad_norm: float,
+        grad_norm_type: int = 2,
+        batch_dim: int = 0,
+        dynamic_sch_func=None,  # e.g., lambda t: 10. (return constant).
+    ):
+        super(DynamicPrivacyEngine, self).__init__(module, batch_size, sample_size, alphas, initial_noise_multiplier,
+                                                   max_grad_norm, grad_norm_type, batch_dim)
+        self.step_noise_multipliers = []
+        if dynamic_sch_func is None:
+            def dynamic_sch_func(t): return initial_noise_multiplier
+        self.dynamic_sch_func = dynamic_sch_func
+
+    def step(self):
+        self.noise_multiplier = self.dynamic_sch_func(self.steps)
+        self.step_noise_multipliers += [self.noise_multiplier]  # record noise multiplier.
+        super().step()
+
+    def get_renyi_divergence(self):
+        step_rdps = torch.tensor(
+            [tf_privacy.compute_rdp(
+                self.sample_rate, noise_multiplier, 1, self.alphas
+            ) for noise_multiplier in self.step_noise_multipliers]
+        )
+        # print(step_rdps.shape)  # [n_batch, n_alpha]
+        return step_rdps
+
+    def get_privacy_spent(self, target_delta: float):
+        rdp = torch.sum(self.get_renyi_divergence(), dim=0)
+        return tf_privacy.get_privacy_spent(self.alphas, rdp, target_delta)
