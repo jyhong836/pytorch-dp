@@ -29,7 +29,7 @@ class PrivacyMetric(metaclass=abc.ABCMeta):
         return ", ".join([f"{k}: {v:g}" for k, v in self.params.items()])
 
     def __format__(self, format_spec):
-        return ", ".join([f"{k}: {v.__format__(format_spec)}" for k, v in self.params.items()])
+        return ", ".join([f"{k}: " + v.__format__(format_spec) for k, v in self.params.items()])
 
     @classmethod
     @abc.abstractmethod

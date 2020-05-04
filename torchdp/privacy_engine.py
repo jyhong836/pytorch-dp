@@ -119,6 +119,12 @@ class PrivacyEngine:
         rdp = self.get_renyi_divergence() * self.steps
         return tf_privacy.get_privacy_spent(self.alphas, rdp, target_delta)
 
+    def get_privacy_metric_value(self, noise_multiplier):
+        cost = self._residual_budget.from_sigma(noise_multiplier)
+        # FIXME: The batch type should be update when we fix the shuffling issue.
+        cost = cost.amp_by_sampling(self.sample_rate, batch_type="random")
+        return cost
+
     def request_budget(self):
         """Try to request an amount of budget based on current `noise_multiplier`. Call this
         before apply the noise to protect privacy.
@@ -130,12 +136,11 @@ class PrivacyEngine:
             DPOutOfBudgetError: If residual budget is not enough
         """
         if self.privacy_budget is not None:
-            cost = self._residual_budget.from_sigma(self.noise_multiplier)
-            # TODO subsampling amplification.
+            cost = self.get_privacy_metric_value(self.noise_multiplier)
             if self._residual_budget < cost:
                 # reject
-                raise DPOutOfBudgetError(f"Request budget ({cost:5g}) is more than "
-                                         f"residual ({self._residual_budget:5g})")
+                raise DPOutOfBudgetError(f"Request budget ({cost:.3g}) > "
+                                         f"residual ({self._residual_budget:.3g}) at step {self.steps}.")
             else:
                 self._residual_budget = self._residual_budget - cost
         return self.noise_multiplier
@@ -163,7 +168,7 @@ class PrivacyEngine:
         if self.privacy_budget is None:
             return "" if str_only else None
         if str_only:
-            return f"residual budget = {self._residual_budget:5g}/{self.privacy_budget:5g}"
+            return f"residual budget = {self._residual_budget:3g}/{self.privacy_budget:3g}"
         else:
             return self._residual_budget
 
