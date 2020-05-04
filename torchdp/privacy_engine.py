@@ -25,6 +25,8 @@ class PrivacyEngine:
         max_grad_norm: float,
         grad_norm_type: int = 2,
         batch_dim: int = 0,
+        max_privacy_cost: float = None,
+        privacy_cost_metric
     ):
         self.steps = 0
         self.module = module
