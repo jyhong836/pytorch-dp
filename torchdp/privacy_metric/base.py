@@ -116,7 +116,7 @@ class PrivacyMetric(metaclass=abc.ABCMeta):
         """The reverse operation of amp_by_sampling."""
         raise DPPropertyNotAvaiableError
 
-    def get_budget_upper_bound(self, sample_rate: Union[float, tf.Tensor] = 1.) -> PrivacyMetric:
+    def get_budget_upper_bound(self, sample_rate: float = 1.) -> PrivacyMetric:
         """Return the upper bound of allowed privacy budget.
 
         :param sample_rate: Float value in (0, 1]. If is 1., then should return a infinite upper bound.
