@@ -7,6 +7,7 @@ from typing import List
 import torch
 from torch import nn
 
+from .privacy_metric import PrivacyMetric, DPOutOfBudgetError
 from . import privacy_analysis as tf_privacy
 from .dp_model_inspector import DPModelInspector
 from .per_sample_gradient_clip import (
@@ -25,9 +26,21 @@ class PrivacyEngine:
         max_grad_norm: float,
         grad_norm_type: int = 2,
         batch_dim: int = 0,
-        max_privacy_cost: float = None,
-        privacy_cost_metric
+        privacy_budget: PrivacyMetric = None,
     ):
+        """
+
+        Args:
+            module: PyTorch module.
+            batch_size ():
+            sample_size ():
+            alphas ():
+            noise_multiplier ():
+            max_grad_norm ():
+            grad_norm_type ():
+            batch_dim ():
+            privacy_budget: Privacy budget. If set, the step will raise DPOutOfBudget except on overflow.
+        """
         self.steps = 0
         self.module = module
         self.alphas = alphas
@@ -38,6 +51,9 @@ class PrivacyEngine:
         self.max_grad_norm = max_grad_norm
         self.grad_norm_type = grad_norm_type
         self.batch_dim = batch_dim
+        self.privacy_budget = privacy_budget
+        if privacy_budget is not None:
+            self._residual_budget = privacy_budget
 
         self.secure_seed = int.from_bytes(os.urandom(8), byteorder="big", signed=True)
         self.secure_generator = (
@@ -97,17 +113,42 @@ class PrivacyEngine:
         return rdp
 
     def get_privacy_spent(self, target_delta: float):
+        """Compute the exact privacy spent by Moment Accountant.
+        TODO Add analytical DP accountant which will be more precise.
+        """
         rdp = self.get_renyi_divergence() * self.steps
         return tf_privacy.get_privacy_spent(self.alphas, rdp, target_delta)
+
+    def request_budget(self):
+        """Try to request an amount of budget based on current `noise_multiplier`. Call this
+        before apply the noise to protect privacy.
+
+        Returns:
+            noise_multiplier: if request is approved.
+
+        Raises:
+            DPOutOfBudgetError: If residual budget is not enough
+        """
+        if self.privacy_budget is not None:
+            cost = self._residual_budget.from_sigma(self.noise_multiplier)
+            # TODO subsampling amplification.
+            if self._residual_budget < cost:
+                # reject
+                raise DPOutOfBudgetError(f"Request budget ({cost:5g}) is more than "
+                                         f"residual ({self._residual_budget:5g})")
+            else:
+                self._residual_budget = self._residual_budget - cost
+        return self.noise_multiplier
 
     def step(self):
         self.steps += 1
         max_norm = self.clipper.step()
         for p in self.module.parameters():
             if p.requires_grad and self.noise_multiplier > 0:
+                noise_multiplier = self.request_budget()
                 noise = torch.normal(
                     0,
-                    self.noise_multiplier * max_norm,
+                    noise_multiplier * max_norm,
                     p.grad.shape,
                     device=self.device,
                     generator=self.secure_generator,
@@ -117,6 +158,14 @@ class PrivacyEngine:
     def to(self, device):
         self.device = device
         return self
+
+    def get_budget_usage(self, str_only=True):
+        if self.privacy_budget is None:
+            return "" if str_only else None
+        if str_only:
+            return f"residual budget = {self._residual_budget:5g}/{self.privacy_budget:5g}"
+        else:
+            return self._residual_budget
 
 
 class DynamicPrivacyEngine(PrivacyEngine):
@@ -129,6 +178,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
         max_grad_norm: float,
         grad_norm_type: int = 2,
         batch_dim: int = 0,
+        privacy_budget: PrivacyMetric = None,
         dynamic_sch_func=None,  # e.g., lambda t, param_dict: 10. (return constant).
         **dyn_fun_param
     ):
@@ -136,7 +186,8 @@ class DynamicPrivacyEngine(PrivacyEngine):
         key `initial_noise_multiplier`."""
         initial_noise_multiplier = dyn_fun_param["initial_noise_multiplier"]
         super(DynamicPrivacyEngine, self).__init__(module, batch_size, sample_size, alphas, initial_noise_multiplier,
-                                                   max_grad_norm, grad_norm_type, batch_dim)
+                                                   max_grad_norm, grad_norm_type, batch_dim,
+                                                   privacy_budget=privacy_budget)
         self.step_noise_multipliers = []
         if dynamic_sch_func is None:
             def dynamic_sch_func(t, param_dict): return dyn_fun_param["initial_noise_multiplier"]

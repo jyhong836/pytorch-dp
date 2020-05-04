@@ -13,6 +13,10 @@ class DPPropertyNotAvaiableError(Exception):
     pass
 
 
+class DPOutOfBudgetError(Exception):
+    """Raise when DP privacy budget has been used up."""
+    pass
+
 # PrivacyMetricTuple = Tuple  # TODO repalce with namedtuple
 
 
@@ -22,8 +26,7 @@ class PrivacyMetric(metaclass=abc.ABCMeta):
         self.params = params
 
     def __repr__(self):
-        return ", ".join([f"{k}: " + (f"{v}" if isinstance(v, tf.Tensor) else f"{v:g}")
-                          for k, v in self.params.items()])
+        return ", ".join([f"{k}: {v:g}" for k, v in self.params.items()])
 
     def __format__(self, format_spec):
         return ", ".join([f"{k}: {v.__format__(format_spec)}" for k, v in self.params.items()])
