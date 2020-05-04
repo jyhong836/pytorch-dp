@@ -124,21 +124,25 @@ class DynamicPrivacyEngine(PrivacyEngine):
         batch_size: int,
         sample_size: int,
         alphas: List[float],
-        initial_noise_multiplier: float,
         max_grad_norm: float,
         grad_norm_type: int = 2,
         batch_dim: int = 0,
-        dynamic_sch_func=None,  # e.g., lambda t: 10. (return constant).
+        dynamic_sch_func=None,  # e.g., lambda t, param_dict: 10. (return constant).
+        **dyn_fun_param
     ):
+        """The dict `dyn_fun_param` will be passed to dynamic_sch_func as the 2nd param. It should at least include
+        key `initial_noise_multiplier`."""
+        initial_noise_multiplier = dyn_fun_param["initial_noise_multiplier"]
         super(DynamicPrivacyEngine, self).__init__(module, batch_size, sample_size, alphas, initial_noise_multiplier,
                                                    max_grad_norm, grad_norm_type, batch_dim)
         self.step_noise_multipliers = []
         if dynamic_sch_func is None:
-            def dynamic_sch_func(t): return initial_noise_multiplier
+            def dynamic_sch_func(t, param_dict): return dyn_fun_param["initial_noise_multiplier"]
         self.dynamic_sch_func = dynamic_sch_func
+        self.dyn_fun_param = dyn_fun_param
 
     def step(self):
-        self.noise_multiplier = self.dynamic_sch_func(self.steps)
+        self.noise_multiplier = self.dynamic_sch_func(self.steps, self.dyn_fun_param)
         self.step_noise_multipliers += [self.noise_multiplier]  # record noise multiplier.
         super().step()
 
