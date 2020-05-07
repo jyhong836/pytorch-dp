@@ -14,6 +14,9 @@ class test_CDP(unittest.TestCase):
         self.target_delta = 1e-8
         self.alphas = [1 + x / 10.0 for x in range(1, 100)] + list(range(12, 64))
 
+        # reset
+        privacy_metric.ctCDP.global_rev_omega = None
+
     def test_dp_zcdp(self):
         sample_rate = self.sample_rate
         batch_type = "shuffle"  # For DP MA, only shuffle is supported.
@@ -118,7 +121,7 @@ class test_CDP(unittest.TestCase):
         # ctCDP
         # set the global constraint omega first.
         ctcdp_total_budget = privacy_metric.ctCDP.from_dp(dp_total_budget)
-        ctcdp_total_cost = self.compose_by_cdp(ctcdp_total_budget, # type(ctcdp_total_budget),
+        ctcdp_total_cost = self.compose_by_cdp(type(ctcdp_total_budget),
                                                  sample_rate, T, batch_type)
 
         # budget (ctCDP) == budget (DP)
