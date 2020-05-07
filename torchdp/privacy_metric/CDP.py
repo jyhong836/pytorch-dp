@@ -116,9 +116,10 @@ class tCDP(PrivacyMetric):
         return 1 / self.rev_omega
 
     def to_dp(self, delta):
-        return self.rho + 2 * sqrt(self.rho * log(1 / delta)) \
+        eps = self.rho + 2 * sqrt(self.rho * log(1 / delta)) \
             if log(1 / delta) <= np.square(self.__omega - 1) * self.rho \
             else self.rho * self.__omega + log(1 / delta) / (self.__omega - 1)
+        return DP(eps, delta)
 
     @classmethod
     def from_dp(cls, dp_metric: DP, rev_omega: Union[float, str] = "zCDP") -> tCDP:
@@ -254,6 +255,7 @@ class ctCDP(tCDP):
         + Compared to zCDP: ctCDP is with a subsampling scale and the trans to DP is different (we choose the different
             one which can get more transformed rho with smaller omega).
         + Compared to tCDP: ctCDP use a constant rev_omega which makes the private noise degraded to zCDP noise.
+    Note: If need to translate to DP, initialize ctCDP by using `from_dp`.
     """
     def __init__(self, rho=10.):
         """Recommend to create ctCDP from the `from_dp`.
@@ -264,7 +266,8 @@ class ctCDP(tCDP):
 
     @property
     def rev_omega(self) -> Union[float, None]:
-        return None
+        # return None
+        return self.global_rev_omega
 
     # NOTE: rev_omega is not used, but just for computing the sigma lower bound.
     # The value will be updated only when first time created from_dp.
@@ -334,7 +337,7 @@ class ctCDP(tCDP):
         # TODO constraint the lower bound and upper bound instead of just estimating a sigma.
 
     @classmethod
-    def from_sigma(cls, sigma, C=1.) -> PrivacyMetric:
+    def from_sigma(cls, sigma, C=1.) -> ctCDP:
         """Create metric from given noise scale."""
         return cls(rho=.5 * (C / sigma) ** 2)
 
