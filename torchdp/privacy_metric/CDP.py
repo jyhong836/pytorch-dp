@@ -393,6 +393,9 @@ class ctCDP(tCDP):
     #                          f"{self.rho}, the sample rate should be <= {np.exp(-self.rho / self.rev_omega)}")
     #     return ret
 
+    # This value should be calibrated by MA. See privacy_metric_test.py: test_RS_sampling_valid.
+    SAMPLING_AMP_SCALE = 1.03
+
     def amp_by_sampling(self, sample_rate: float, batch_type="random") -> ctCDP:
         if sample_rate == 1.:
             return self
@@ -409,9 +412,10 @@ class ctCDP(tCDP):
         #                                                                      "rev_omega."
         # These should be checked using MA.
         # return ctCDP(rho=13. * self.rho * sample_rate ** 2)
-        return ctCDP(rho=self.rho * sample_rate ** 2)
+        return ctCDP(rho=self.SAMPLING_AMP_SCALE * self.rho * sample_rate ** 2)
+        # return ctCDP(rho=self.rho * sample_rate ** 2)
 
     def deamp_by_sampling(self, sample_rate: float, batch_type="random") -> PrivacyMetric:
         assert batch_type == "random"
-        return ctCDP(rho=self.rho / (sample_rate ** 2))  # (13. * sample_rate ** 2))
+        return ctCDP(rho=self.SAMPLING_AMP_SCALE * self.rho / (sample_rate ** 2))  # (13. * sample_rate ** 2))
         # return ctCDP(rho=self.rho / (13. * sample_rate ** 2))

@@ -15,7 +15,7 @@ class test_CDP(unittest.TestCase):
         self.alphas = [1 + x / 10.0 for x in range(1, 100)] + list(range(12, 64))
 
     def test_dp_zcdp(self):
-        sample_rate = self.sample_rate  # full batch
+        sample_rate = self.sample_rate
         batch_type = "shuffle"  # For DP MA, only shuffle is supported.
 
         # zCDP from noise
@@ -84,3 +84,79 @@ class test_CDP(unittest.TestCase):
                                msg="Step noise multiplier should be approximately equal.")
 
     # TODO test dynamic schedule
+
+    def compose_by_ma(self, sample_rate, T):
+        # MA DP from noise
+        rdps = tf_privacy.compute_rdp(sample_rate, self.sigma, 1, self.alphas)
+        rdp = rdps * T
+        eps, _ = tf_privacy.get_privacy_spent(self.alphas, rdp, self.target_delta)
+        dp = privacy_metric.DP(eps, self.target_delta)
+        return dp
+
+    def compose_by_ctcdp(self, metric_type, sample_rate, T, batch_type):
+        # set the global constraint omega first.
+        ctcdp = metric_type.from_sigma(self.sigma).amp_by_sampling(sample_rate, batch_type=batch_type)
+        ctcdp = privacy_metric.ctCDP(rho=ctcdp.rho * T)
+        return ctcdp
+
+    def test_RS_sampling_valid(self):
+        """Busing uniform schedule, check if the sampling amplification valid, i.e.,
+        the cost after amplification is larger than the standard cost (DP) after composition.
+        Fail if the metric compose cost is lower than MA or much higher than MA.
+        """
+        sample_rate = self.sample_rate
+        batchs_per_epoch = int(1 / self.sample_rate)
+        batch_type = "random"
+        T = self.epochs * batchs_per_epoch
+
+        # MA DP from noise
+        dp_total_budget = self.compose_by_ma(sample_rate, T)
+
+        # ctCDP
+        # set the global constraint omega first.
+        ctcdp_total_budget = privacy_metric.ctCDP.from_dp(dp_total_budget)
+        ctcdp_total_cost = self.compose_by_ctcdp(ctcdp_total_budget, # type(ctcdp_total_budget),
+                                                 sample_rate, T, batch_type)
+
+        # budget (ctCDP) == budget (DP)
+        self.assertAlmostEqual(ctcdp_total_budget.to_dp(self.target_delta).eps, dp_total_budget.eps, places=3,
+                               msg="budget (ctCDP) != budget (DP)")
+
+        # cost (ctCDP) >= budget (ctCDP and DP)
+        self.assertGreaterEqual(ctcdp_total_cost.rho, ctcdp_total_budget.rho,
+                                msg="cost (ctCDP) < budget (ctCDP)")
+        self.assertGreaterEqual(ctcdp_total_cost.to_dp(self.target_delta).eps, dp_total_budget.eps,
+                                msg="cost (ctCDP) < budget (DP)")
+
+        # cost (ctCDP) == budget (ctCDP and DP)
+        self.assertAlmostEqual(ctcdp_total_cost.rho, ctcdp_total_budget.rho, delta=ctcdp_total_budget.rho*0.1,
+                               msg="cost (ctCDP) not equal budget (ctCDP)."
+                               )
+        self.assertAlmostEqual(ctcdp_total_cost.to_dp(self.target_delta).eps, dp_total_budget.eps, delta=0.01*dp_total_budget.eps,
+                               msg="cost (ctCDP) not equal budget (DP).")
+
+    def test_RS_sampling_valid_step(self):
+        """Busing uniform schedule, check if the sampling amplification valid, i.e.,
+        the cost after amplification is larger than the standard cost (DP) after composition.
+        Fail if the metric compose cost is lower than MA or much higher than MA.
+        """
+        sample_rate = self.sample_rate
+        batchs_per_epoch = int(1 / self.sample_rate)
+        batch_type = "random"
+        T = self.epochs * batchs_per_epoch
+
+        # MA DP from noise
+        dp_total_budget = self.compose_by_ma(sample_rate, T)
+        # ctCDP: set the global constraint omega first.
+        ctcdp_total_budget = privacy_metric.ctCDP.from_dp(dp_total_budget)
+
+        for t in range(1, T, 100):
+            # MA
+            dp_cost = self.compose_by_ma(sample_rate, t)
+
+            # ctCDP
+            ctcdp_cost = self.compose_by_ctcdp(type(ctcdp_total_budget), sample_rate, t, batch_type)
+
+            # cost (ctCDP) >= cost (DP)
+            self.assertGreaterEqual(ctcdp_cost.to_dp(self.target_delta).eps, dp_cost.eps,
+                                    msg=f"cost (ctCDP) < cost (DP) at step {t}")
