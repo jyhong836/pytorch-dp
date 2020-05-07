@@ -55,6 +55,7 @@ class PrivacyEngine:
         self.privacy_budget = privacy_budget
         if privacy_budget is not None:
             self._residual_budget = privacy_budget
+            # self._accumulate_cost = privacy_budget.zero()
 
         self.secure_seed = int.from_bytes(os.urandom(8), byteorder="big", signed=True)
         self.secure_generator = (
@@ -143,15 +144,19 @@ class PrivacyEngine:
                 raise DPOutOfBudgetError(f"Request budget ({cost:.3g}) > "
                                          f"residual ({self._residual_budget:.3g}) at step {self.steps}.")
             else:
+                # self._accumulate_cost = self._accumulate_cost.compose([self._accumulate_cost, cost])
+                # FIXME The substraction may only be defined for some metric but compose is for all qualified metrics.
                 self._residual_budget = self._residual_budget - cost
+                # diff = self.privacy_budget.compose([self._accumulate_cost, self._residual_budget]) - self.privacy_budget
+                # assert(abs(diff.rho) < 1e-15)
         return self.noise_multiplier
 
     def step(self):
         self.steps += 1
         max_norm = self.clipper.step()
+        noise_multiplier = self.request_budget()
         for p in self.module.parameters():
             if p.requires_grad and self.noise_multiplier > 0:
-                noise_multiplier = self.request_budget()
                 noise = torch.normal(
                     0,
                     noise_multiplier * max_norm,

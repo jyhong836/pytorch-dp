@@ -391,9 +391,11 @@ class ctCDP(tCDP):
         # TODO the assertion may fail. We only constraint the rho to satisfy the condition for simplicity.
         #     assert self.rev_omega * np.log(1 / sample_rate) / 4 >= self.rho , "Invalid sample rate for the fixed " \
         #                                                                      "rev_omega."
-        return ctCDP(rho=13. * self.rho * sample_rate ** 2)
-        # return ctCDP(rho=self.rho * sample_rate ** 2)
+        # These should be checked using MA.
+        # return ctCDP(rho=13. * self.rho * sample_rate ** 2)
+        return ctCDP(rho=self.rho * sample_rate ** 2)
 
     def deamp_by_sampling(self, sample_rate: float, batch_type="random") -> PrivacyMetric:
         assert batch_type == "random"
         return ctCDP(rho=self.rho / (sample_rate ** 2))  # (13. * sample_rate ** 2))
+        # return ctCDP(rho=self.rho / (13. * sample_rate ** 2))
