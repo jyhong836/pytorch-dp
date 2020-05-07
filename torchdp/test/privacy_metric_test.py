@@ -89,15 +89,18 @@ class test_CDP(unittest.TestCase):
         # MA DP from noise
         rdps = tf_privacy.compute_rdp(sample_rate, self.sigma, 1, self.alphas)
         rdp = rdps * T
-        eps, _ = tf_privacy.get_privacy_spent(self.alphas, rdp, self.target_delta)
+        eps, alpha = tf_privacy.get_privacy_spent(self.alphas, rdp, self.target_delta)
         dp = privacy_metric.DP(eps, self.target_delta)
         return dp
 
-    def compose_by_ctcdp(self, metric_type, sample_rate, T, batch_type):
+    def compose_by_cdp(self, metric_type, sample_rate, T, batch_type):
+        """metric_type: zCDP or ctCDP."""
         # set the global constraint omega first.
-        ctcdp = metric_type.from_sigma(self.sigma).amp_by_sampling(sample_rate, batch_type=batch_type)
-        ctcdp = privacy_metric.ctCDP(rho=ctcdp.rho * T)
-        return ctcdp
+        cdp = metric_type.from_sigma(self.sigma).amp_by_sampling(sample_rate, batch_type=batch_type)
+        if batch_type == "shuffle":
+            assert (T*sample_rate).is_integer()
+        cdp = metric_type(rho=cdp.rho * T)
+        return cdp
 
     def test_RS_sampling_valid(self):
         """Busing uniform schedule, check if the sampling amplification valid, i.e.,
@@ -115,7 +118,7 @@ class test_CDP(unittest.TestCase):
         # ctCDP
         # set the global constraint omega first.
         ctcdp_total_budget = privacy_metric.ctCDP.from_dp(dp_total_budget)
-        ctcdp_total_cost = self.compose_by_ctcdp(ctcdp_total_budget, # type(ctcdp_total_budget),
+        ctcdp_total_cost = self.compose_by_cdp(ctcdp_total_budget, # type(ctcdp_total_budget),
                                                  sample_rate, T, batch_type)
 
         # budget (ctCDP) == budget (DP)
@@ -155,8 +158,71 @@ class test_CDP(unittest.TestCase):
             dp_cost = self.compose_by_ma(sample_rate, t)
 
             # ctCDP
-            ctcdp_cost = self.compose_by_ctcdp(type(ctcdp_total_budget), sample_rate, t, batch_type)
+            ctcdp_cost = self.compose_by_cdp(type(ctcdp_total_budget), sample_rate, t, batch_type)
 
             # cost (ctCDP) >= cost (DP)
             self.assertGreaterEqual(ctcdp_cost.to_dp(self.target_delta).eps, dp_cost.eps,
                                     msg=f"cost (ctCDP) < cost (DP) at step {t}")
+
+    def test_RF_sampling_valid(self):
+        """Uniform schedule.
+        We will compare the given metric and MA in composing privacy costs.
+        Fail if the metric compose cost is lower than MA or much higher than MA.
+        """
+        sample_rate = self.sample_rate
+        batchs_per_epoch = int(1 / self.sample_rate)
+        batch_type = "shuffle"
+        T = self.epochs * batchs_per_epoch
+
+        # MA DP from noise
+        # dp_total_budget = self.compose_by_ma(sample_rate, T)
+        dp_total_budget = self.compose_by_ma(1., self.epochs)
+
+        # ctCDP
+        # set the global constraint omega first.
+        cdp_total_budget = privacy_metric.zCDP.from_dp(dp_total_budget)
+        cdp_total_cost = self.compose_by_cdp(type(cdp_total_budget),
+                                                 sample_rate, T, batch_type)
+
+        # budget (ctCDP) == budget (DP)
+        self.assertAlmostEqual(cdp_total_budget.to_dp(self.target_delta).eps, dp_total_budget.eps, places=3,
+                               msg="budget (ctCDP) != budget (DP)")
+
+        # cost (ctCDP) >= budget (ctCDP and DP)
+        self.assertGreaterEqual(cdp_total_cost.rho + 0.0001, cdp_total_budget.rho,
+                                msg="cost (ctCDP) < budget (ctCDP)")
+        self.assertGreaterEqual(cdp_total_cost.to_dp(self.target_delta).eps+0.001, dp_total_budget.eps,
+                                msg="cost (ctCDP) < budget (DP)")
+
+        # cost (ctCDP) == budget (ctCDP and DP)
+        self.assertAlmostEqual(cdp_total_cost.rho, cdp_total_budget.rho, delta=cdp_total_budget.rho*0.1,
+                               msg="cost (ctCDP) not equal budget (ctCDP)."
+                               )
+        self.assertAlmostEqual(cdp_total_cost.to_dp(self.target_delta).eps, dp_total_budget.eps, delta=0.01*dp_total_budget.eps,
+                               msg="cost (ctCDP) not equal budget (DP).")
+
+    def test_RF_sampling_valid_step(self):
+        """Busing uniform schedule, check if the sampling amplification valid, i.e.,
+        the cost after amplification is larger than the standard cost (DP) after composition.
+        Fail if the metric compose cost is lower than MA or much higher than MA.
+        """
+        sample_rate = self.sample_rate
+        batchs_per_epoch = int(1 / self.sample_rate)
+        batch_type = "shuffle"
+
+        # MA DP from noise
+        dp_total_budget = self.compose_by_ma(1, self.epochs)
+        # ctCDP: set the global constraint omega first.
+        ctcdp_total_budget = privacy_metric.zCDP.from_dp(dp_total_budget)
+
+        for ep in range(1, self.epochs, 100):
+            t = ep * batchs_per_epoch
+            # MA
+            dp_cost = self.compose_by_ma(1, ep)
+
+            # ctCDP
+            ctcdp_cost = self.compose_by_cdp(type(ctcdp_total_budget), sample_rate, t, batch_type)
+
+            # cost (ctCDP) >= cost (DP)
+            self.assertGreaterEqual(ctcdp_cost.to_dp(self.target_delta).eps+0.0001, dp_cost.eps,
+                                    msg=f"cost (ctCDP) < cost (DP) at epoch {t}")
