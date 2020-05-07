@@ -3,6 +3,7 @@
 import os
 import types
 from typing import List
+import numpy as np
 
 import torch
 from torch import nn
@@ -28,6 +29,7 @@ class PrivacyEngine:
         grad_norm_type: int = 2,
         batch_dim: int = 0,
         privacy_budget: PrivacyMetric = None,
+        batch_type: str = "shuffle"
     ):
         """
 
@@ -41,6 +43,8 @@ class PrivacyEngine:
             grad_norm_type ():
             batch_dim ():
             privacy_budget: Privacy budget. If set, the step will raise DPOutOfBudget except on overflow.
+            batch_type ('shuffle'|'random'): Type of batch method. This will result in different privacy counting
+                tech.
         """
         self.steps = 0
         self.module = module
@@ -53,6 +57,8 @@ class PrivacyEngine:
         self.grad_norm_type = grad_norm_type
         self.batch_dim = batch_dim
         self.privacy_budget = privacy_budget
+        # self.n_batches_per_epoch = n_batches_per_epoch  # this will be estimated by `1/self.sample_rate`
+        self.batch_type = batch_type
         if privacy_budget is not None:
             self._residual_budget = privacy_budget
             # self._accumulate_cost = privacy_budget.zero()
@@ -124,7 +130,7 @@ class PrivacyEngine:
     def get_privacy_metric_value(self, noise_multiplier):
         cost = self._residual_budget.from_sigma(noise_multiplier)
         # FIXME: The batch type should be update when we fix the shuffling issue.
-        cost = cost.amp_by_sampling(self.sample_rate, batch_type="random")
+        cost = cost.amp_by_sampling(self.sample_rate, batch_type=self.batch_type)
         return cost
 
     def request_budget(self):
@@ -149,6 +155,9 @@ class PrivacyEngine:
                 self._residual_budget = self._residual_budget - cost
                 # diff = self.privacy_budget.compose([self._accumulate_cost, self._residual_budget]) - self.privacy_budget
                 # assert(abs(diff.rho) < 1e-15)
+                # print(self.privacy_budget.from_sigma(self.noise_multiplier))
+                cost__ = self.privacy_budget.from_sigma(self.noise_multiplier).amp_by_sampling(self.sample_rate, batch_type=self.batch_type)
+                # print(cost, cost__)
         return self.noise_multiplier
 
     def step(self):
@@ -179,6 +188,19 @@ class PrivacyEngine:
             return self._residual_budget
 
 
+class NoiseScheduler(object):
+    def __call__(self, t, param_dict):
+        return param_dict['initial_noise_multiplier']
+
+
+class ExpDecaySch(NoiseScheduler):
+    def __call__(self, t, param_dict):
+        if param_dict["batch_type"] == "shuffle":
+            # t and i_epoch both start from 0.
+            t = np.floor(t * param_dict['sample_rate'])  # index of current epoch.
+        return param_dict['initial_noise_multiplier'] * np.exp(- param_dict['k'] * t)
+
+
 class DynamicPrivacyEngine(PrivacyEngine):
     def __init__(
         self,
@@ -190,20 +212,28 @@ class DynamicPrivacyEngine(PrivacyEngine):
         grad_norm_type: int = 2,
         batch_dim: int = 0,
         privacy_budget: PrivacyMetric = None,
-        dynamic_sch_func=None,  # e.g., lambda t, param_dict: 10. (return constant).
+        batch_type: str = "shuffle",
+        dynamic_sch_func: NoiseScheduler = None,  # e.g., lambda t, param_dict: 10. (return constant).
         **dyn_fun_param
     ):
-        """The dict `dyn_fun_param` will be passed to dynamic_sch_func as the 2nd param. It should at least include
-        key `initial_noise_multiplier`."""
+        """
+        Args:
+            dyn_fun_param: Dict of parameters for dynamic_sch_func. Possible params which depends on the sch_func:
+                dynamic_interval: The step interval for updating noise multiplier. Use this to make epoch-wise
+                    schedule. For example, set it to be the number of batch in one epoch.
+                initial_noise_multiplier: The initial noise.
+        """
         initial_noise_multiplier = dyn_fun_param["initial_noise_multiplier"]
         super(DynamicPrivacyEngine, self).__init__(module, batch_size, sample_size, alphas, initial_noise_multiplier,
                                                    max_grad_norm, grad_norm_type, batch_dim,
-                                                   privacy_budget=privacy_budget)
+                                                   privacy_budget=privacy_budget, batch_type=batch_type)
         self.step_noise_multipliers = []
         if dynamic_sch_func is None:
             def dynamic_sch_func(t, param_dict): return dyn_fun_param["initial_noise_multiplier"]
         self.dynamic_sch_func = dynamic_sch_func
         self.dyn_fun_param = dyn_fun_param
+        self.dyn_fun_param["batch_type"] = self.batch_type
+        self.dyn_fun_param["sample_rate"] = self.sample_rate
 
     def step(self):
         self.noise_multiplier = self.dynamic_sch_func(self.steps, self.dyn_fun_param)
@@ -212,6 +242,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
         super().step()
 
     def get_renyi_divergence(self):
+        self.validate_noise_dynamic()
         step_rdps = torch.tensor(
             [tf_privacy.compute_rdp(
                 self.sample_rate, noise_multiplier, 1, self.alphas
@@ -219,6 +250,28 @@ class DynamicPrivacyEngine(PrivacyEngine):
         )
         # print(step_rdps.shape)  # [n_batch, n_alpha]
         return step_rdps
+
+    def validate_noise_dynamic(self):
+        """Check the step noise multipliers in current epoch. This will also check if the
+        batch round the number of samples by examining the sample_rate."""
+        # FIXME this will be very inefficient to do in steps.
+        if self.batch_type == "shuffle":
+            # TODO check epoch-wise constant noise.
+            n_batchs_per_epoch = 1/self.sample_rate
+            assert n_batchs_per_epoch.is_integer(), "Number of batch is not integer. Try to " \
+                                                    "select batch size to round the data size."
+            n_batchs_per_epoch = int(n_batchs_per_epoch)
+            T = len(self.step_noise_multipliers) - 1
+            if T + 1 < n_batchs_per_epoch:
+                return
+            epoch = int(np.floor(T * self.sample_rate))
+            start = epoch*n_batchs_per_epoch
+            end = np.minimum((epoch+1)*n_batchs_per_epoch, T)
+            # print(start, len(self.step_noise_multipliers), T)
+            v = self.step_noise_multipliers[start]
+            for i, v_ in enumerate(self.step_noise_multipliers[start:end]):
+                assert v_ == v, f"Step noise is not constant in step {i} of epoch {epoch}. " \
+                                f"Or globally, at step {start+i}."
 
     def get_privacy_spent(self, target_delta: float):
         rdp = torch.sum(self.get_renyi_divergence(), dim=0)

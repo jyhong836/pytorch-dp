@@ -45,7 +45,7 @@ class zCDP(PrivacyMetric):
         return DP(eps=self.rho + 2 * np.sqrt(self.rho * np.log(1 / delta)), delta=delta)
 
     @classmethod
-    def from_dp(cls, dp_metric: DP) -> PrivacyMetric:
+    def from_dp(cls, dp_metric: DP) -> zCDP:
         # return zCDP(rho=dp_metric.params["eps"]**2/2)
         return cls(rho=dp_to_zcdp(dp_metric.eps, dp_metric.delta))
 
@@ -93,6 +93,21 @@ class zCDP(PrivacyMetric):
     def get_budget_upper_bound(self, sample_rate: float) -> zCDP:
         """Return the upper bound of allowed privacy budget."""
         return zCDP(rho=np.inf)
+
+    def amp_by_sampling(self, sample_rate: float, batch_type="shuffle") -> zCDP:
+        """Privacy amplification by subsampling. This method will return step privacy cost if the step is one
+        of an epoch.
+
+        :param sample_rate: Batch size over number of samples.
+        :param batch_type: 'shuffle'.
+        :return: Return the amplified privacy metric.
+        """
+        assert batch_type == "shuffle", "For zCDP, only 'shuffle' batch type is implemented."
+        return zCDP(rho=self.rho * sample_rate)
+
+    def deamp_by_sampling(self, sample_rate: float, batch_type="shuffle") -> zCDP:
+        assert batch_type == "shuffle", "For zCDP, only 'shuffle' batch type is implemented."
+        return zCDP(rho=self.rho / sample_rate)
 
 
 class tCDP(PrivacyMetric):
@@ -246,6 +261,7 @@ class tCDP(PrivacyMetric):
         return cls(rho=0., rev_omega=0.)
 
     def amp_by_sampling(self, sample_rate: float, batch_type="random") -> tCDP:
+        assert batch_type == "random", "For tCDP, only random batch type is implemented."
         return tCDP(rho=13 * self.rho * sample_rate**2, rev_omega=4 * self.rho / log(1/sample_rate))
 
 
@@ -381,7 +397,7 @@ class ctCDP(tCDP):
         if sample_rate == 1.:
             return self
         self.validate_sample_rate(sample_rate)
-        assert batch_type == "random"
+        assert batch_type == "random", "For ctCDP, only random batch type is implemented."
         # if isinstance(sample_rate, tf.Tensor):
         #     # ass = tf.assert_greater_equal(self.rev_omega, 4 * self.rho / tf.log(1. / sample_rate),
         #     #                               message="Invalid sample rate for the fixed rev_omega.")
