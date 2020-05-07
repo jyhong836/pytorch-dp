@@ -10,6 +10,7 @@ from torch import nn
 from .privacy_metric import PrivacyMetric, DPOutOfBudgetError
 from . import privacy_analysis as tf_privacy
 from .dp_model_inspector import DPModelInspector
+from . import stats
 from .per_sample_gradient_clip import (
     PerSampleGradientClipper,
     __clip_value_calculation_params__ as clipping_method)
@@ -62,7 +63,7 @@ class PrivacyEngine:
             else torch.cuda.manual_seed(self.secure_seed)
         )
         self.validator = DPModelInspector()
-        self.clipper = None  # lazy initialization in attach
+        self.clipper: PerSampleGradientClipper = None  # lazy initialization in attach
 
     def detach(self):
         optim = self.optimizer
@@ -202,6 +203,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
     def step(self):
         self.noise_multiplier = self.dynamic_sch_func(self.steps, self.dyn_fun_param)
         self.step_noise_multipliers += [self.noise_multiplier]  # record noise multiplier.
+        stats.update(stats.StatType.PRIVACY, 'AllLayers', noise_multiplier=self.noise_multiplier)
         super().step()
 
     def get_renyi_divergence(self):

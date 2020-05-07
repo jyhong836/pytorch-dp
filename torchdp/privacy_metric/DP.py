@@ -14,11 +14,11 @@ class DP(PrivacyMetric):
         super().__init__(eps=eps, delta=delta)
 
     @property
-    def eps(self) -> Union[float, tf.Tensor]:
+    def eps(self) -> float:
         return self.params['eps']
 
     @property
-    def delta(self) -> Union[float, tf.Tensor]:
+    def delta(self) -> float:
         return self.params['delta']
 
     def to_dp(self, delta) -> DP:
