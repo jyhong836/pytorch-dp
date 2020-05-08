@@ -228,6 +228,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
                                                    max_grad_norm, grad_norm_type, batch_dim,
                                                    privacy_budget=privacy_budget, batch_type=batch_type)
         self.step_noise_multipliers = []
+        self.accumulated_rdp = None
         if dynamic_sch_func is None:
             def dynamic_sch_func(t, param_dict): return dyn_fun_param["initial_noise_multiplier"]
         self.dynamic_sch_func = dynamic_sch_func
@@ -236,13 +237,29 @@ class DynamicPrivacyEngine(PrivacyEngine):
         self.dyn_fun_param["sample_rate"] = self.sample_rate
 
     def step(self):
-        self.noise_multiplier = self.dynamic_sch_func(self.steps, self.dyn_fun_param)
+        noise_multiplier = self.dynamic_sch_func(self.steps, self.dyn_fun_param)
+        old_noise_multiplier = self.noise_multiplier
+        self.noise_multiplier = noise_multiplier
+        try:
+            # Try to apply the noise multiplier.
+            super().step()
+            self.record_step_noise_multiplier(self.noise_multiplier)
+        except DPOutOfBudgetError as e:
+            self.noise_multiplier = old_noise_multiplier
+            raise e
+
+    def record_step_noise_multiplier(self, noise_multiplier):
         self.step_noise_multipliers += [self.noise_multiplier]  # record noise multiplier.
         stats.update(stats.StatType.PRIVACY, 'AllLayers', noise_multiplier=self.noise_multiplier)
-        super().step()
+        step_rdp = tf_privacy.compute_rdp(self.sample_rate, noise_multiplier, 1, self.alphas)
+        if self.accumulated_rdp is None:
+            self.accumulated_rdp = step_rdp
+        else:
+            self.accumulated_rdp = step_rdp + self.accumulated_rdp
 
     def get_renyi_divergence(self):
-        self.validate_noise_dynamic()
+        # TODO use this to verify the dynamic.
+        # self.validate_noise_dynamic()
         step_rdps = torch.tensor(
             [tf_privacy.compute_rdp(
                 self.sample_rate, noise_multiplier, 1, self.alphas
@@ -268,11 +285,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
             start = epoch*n_batchs_per_epoch
             end = np.minimum((epoch+1)*n_batchs_per_epoch, T)
             # print(start, len(self.step_noise_multipliers), T)
-            v = self.step_noise_multipliers[start]
-            for i, v_ in enumerate(self.step_noise_multipliers[start:end]):
-                assert v_ == v, f"Step noise is not constant in step {i} of epoch {epoch}. " \
-                                f"Or globally, at step {start+i}."
+            assert np.sum(np.abs(np.array(self.step_noise_multipliers[start:end]) - self.step_noise_multipliers[start])) < 1e-3, f"Step noise is not constant at epoch {epoch}."
 
     def get_privacy_spent(self, target_delta: float):
-        rdp = torch.sum(self.get_renyi_divergence(), dim=0)
-        return tf_privacy.get_privacy_spent(self.alphas, rdp, target_delta)
+        return tf_privacy.get_privacy_spent(self.alphas, self.accumulated_rdp, target_delta)
