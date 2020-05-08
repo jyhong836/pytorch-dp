@@ -194,11 +194,19 @@ class NoiseScheduler(object):
 
 
 class ExpDecaySch(NoiseScheduler):
-    def __call__(self, t, param_dict):
+    def __call__(self, t, initial_noise_multiplier=10., k=0.01, **param_dict):
         if param_dict["batch_type"] == "shuffle":
             # t and i_epoch both start from 0.
             t = np.floor(t * param_dict['sample_rate'])  # index of current epoch.
-        return param_dict['initial_noise_multiplier'] * np.exp(- param_dict['k'] * t)
+        return initial_noise_multiplier * np.exp(- k * t)
+
+
+class StepDecaySch(NoiseScheduler):
+    def __call__(self, t, initial_noise_multiplier=10., k=0.6, period=10, **param_dict):
+        if param_dict["batch_type"] == "shuffle":
+            # t and i_epoch both start from 0.
+            t = np.floor(t * param_dict['sample_rate'])  # index of current epoch.
+        return initial_noise_multiplier * (k ** (t // period))
 
 
 class DynamicPrivacyEngine(PrivacyEngine):
@@ -237,7 +245,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
         self.dyn_fun_param["sample_rate"] = self.sample_rate
 
     def step(self):
-        noise_multiplier = self.dynamic_sch_func(self.steps, self.dyn_fun_param)
+        noise_multiplier = self.dynamic_sch_func(self.steps, **self.dyn_fun_param)
         old_noise_multiplier = self.noise_multiplier
         self.noise_multiplier = noise_multiplier
         try:
