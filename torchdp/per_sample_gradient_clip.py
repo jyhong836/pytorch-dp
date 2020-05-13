@@ -27,6 +27,7 @@ call as the second pass just works on top of the store grad_sample.
 """
 
 import torch
+import numpy as np
 
 from . import autograd_grad_sample
 from . import stats
@@ -106,6 +107,64 @@ def clip_per_sample_grad_norm_(model, max_norm) -> float:
     return max_norm
 
 
+def clip_per_sample_layer_grad_norm_(model, max_norm) -> float:
+    r"""Clips the grad_sample stored in .grad_sample by computing a per-sample
+    norm clip factor, using it to rescale each sample's gradient in
+    .grad_sample to norm clip, then averaging them back into .grad.
+
+    The gradients of the model's parameters are modified in-place.
+
+    We assume the batch size is the first dimension.
+
+    Arguments:
+        tensor (Tensor): a single Tensor whose norm will be normalized
+        max_norm (float or int): max norm of the gradients of each layer
+
+    Returns:
+        New total norm of the tensor. The norm of all layers is computed by
+        torch.norm([max norm of layer 1, max norm of layer 2,... ])
+    """
+    per_sample_layer_norms = get_total_per_sample_grad_norm(model, reduce_layer=False)
+    n_layers = per_sample_layer_norms.shape[1]  # num of layers that requires grad.
+    max_norm = [_calc_thresh(per_sample_layer_norms[:, i], current_max=float(max_norm),
+                             **__clip_value_calculation_params__) for i in range(n_layers)]
+    # Each sample gets clipped independently. This is a tensor of size B
+    per_sample_clip_factor = [(max_norm[i] / (per_sample_layer_norms[:, i] + 1e-6)).clamp(max=1.0)
+                              for i in range(n_layers)]
+    total_max_norm = np.linalg.norm(max_norm)
+    # total_max_norm = max_norm[0]  # TODO this may be wrong
+
+    # We are *clipping* the gradient, so if the factor is ever >1 we set it to 1
+    # per_sample_clip_factor = per_sample_clip_factor.clamp(max=1.0)
+    b_sz = len(per_sample_clip_factor[0])
+
+    # We recompute .grad from .grad_sample by simply averaging it over the B dim
+    sign_switched = 0
+    total_num = 0
+    i_layer = 0  # index of layer that requires grad.
+    for p_name, p in model.named_parameters():
+        if p.requires_grad:
+            if p_name.endswith("bias"):
+                # print("!!!!")
+                i_layer -= 1
+            # print(f"{p_name}")
+            pre_clip_pos = p.grad_sample.mean(0) > 0
+            p.grad = torch.einsum("i,i...", per_sample_clip_factor[i_layer], p.grad_sample) / b_sz
+            post_clip_pos = p.grad > 0
+            sign_switched += (pre_clip_pos ^ post_clip_pos).sum()
+            total_num += post_clip_pos.numel()
+            i_layer += 1
+    sign_switched = float(sign_switched) / total_num
+    stats.update(stats.StatType.CLIPPING, 'AllLayers',
+                 # clip=max_norm,  # this is a list of max_norm for all layers.
+                 # max=per_sample_norm.max(),
+                 # mean=per_sample_norm.mean(),
+                 # median=per_sample_norm.median(),
+                 # percent=(per_sample_norm > max_norm).to(dtype=torch.float64).mean(),
+                 switch=sign_switched)
+    return total_max_norm
+
+
 def get_per_sample_norm(t, name, stat):
     aggregation_dims = [i for i in range(1, len(t.shape))]  # All dims except the first
     t_squared = t * t  # elementwise
@@ -117,18 +176,29 @@ def get_per_sample_norm(t, name, stat):
     return batch_norms
 
 
-def get_total_per_sample_grad_norm(model):
+def get_total_per_sample_grad_norm(model, reduce_layer=True):
     stat = {}
-    all_layers_norms = torch.stack(
-        [get_per_sample_norm(p.grad_sample, name, stat)\
-            for name, p in model.named_parameters() if p.requires_grad], dim=-1
-    )
+    if not reduce_layer:
+        all_layers_norms = []
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                norms = get_per_sample_norm(p.grad_sample, name, stat)
+                if name.endswith("bias"):
+                    weight_norm = all_layers_norms.pop()
+                    norms = torch.norm(torch.stack([norms, weight_norm], dim=-1), dim=1)
+                all_layers_norms += [norms]
+        all_layers_norms = torch.stack(all_layers_norms, dim=-1)
+    else:
+        all_layers_norms = torch.stack(
+            [get_per_sample_norm(p.grad_sample, name, stat)\
+                for name, p in model.named_parameters() if p.requires_grad], dim=-1
+        )
     stats.update(stats.StatType.CLIPPING, 'IndividualLayers', **stat)
-    return all_layers_norms.norm(2, dim=1)
+    return all_layers_norms.norm(2, dim=1) if reduce_layer else all_layers_norms
 
 
 class PerSampleGradientClipper:
-    def __init__(self, module, max_norm, batch_dim=0):
+    def __init__(self, module, max_norm, batch_dim=0, layer_wise=False):
         """
         Attaches to a module, and clips all grad_sample in the backward
         pass. It then puts them in each parameter's .grad.
@@ -138,6 +208,7 @@ class PerSampleGradientClipper:
         self.max_norm = max_norm
         self.hooks_attached = True
         self.batch_dim = batch_dim
+        self.layer_wise = layer_wise
 
     def __del__(self):
         self.close()
@@ -159,6 +230,9 @@ class PerSampleGradientClipper:
             p.grad_sample.shape[0] for p in self.module.parameters() if p.requires_grad
         )
 
-        max_norm = clip_per_sample_grad_norm_(self.module, self.max_norm)
+        if self.layer_wise:
+            max_norm = clip_per_sample_layer_grad_norm_(self.module, self.max_norm)
+        else:
+            max_norm = clip_per_sample_grad_norm_(self.module, self.max_norm)
         autograd_grad_sample.clear_backprops(self.module)
         return max_norm

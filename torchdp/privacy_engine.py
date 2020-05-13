@@ -29,7 +29,8 @@ class PrivacyEngine:
         grad_norm_type: int = 2,
         batch_dim: int = 0,
         privacy_budget: PrivacyMetric = None,
-        batch_type: str = "shuffle"
+        batch_type: str = "shuffle",
+        layer_wise_clip: bool = False,
     ):
         """
 
@@ -59,6 +60,7 @@ class PrivacyEngine:
         self.privacy_budget = privacy_budget
         # self.n_batches_per_epoch = n_batches_per_epoch  # this will be estimated by `1/self.sample_rate`
         self.batch_type = batch_type
+        self.layer_wise_clip = layer_wise_clip
         if privacy_budget is not None:
             self._residual_budget = privacy_budget
             # self._accumulate_cost = privacy_budget.zero()
@@ -99,7 +101,7 @@ class PrivacyEngine:
                   'are not privacy safe; Caclulated privacy loss is not '
                   'indicative of a proper bound.')
         self.clipper = PerSampleGradientClipper(
-            self.module, self.max_grad_norm, self.batch_dim
+            self.module, self.max_grad_norm, self.batch_dim, self.layer_wise_clip
         )
 
         def dp_step(self, closure=None):
@@ -221,6 +223,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
         batch_dim: int = 0,
         privacy_budget: PrivacyMetric = None,
         batch_type: str = "shuffle",
+        layer_wise_clip: bool = False,
         dynamic_sch_func: NoiseScheduler = None,  # e.g., lambda t, param_dict: 10. (return constant).
         **dyn_fun_param
     ):
@@ -234,7 +237,8 @@ class DynamicPrivacyEngine(PrivacyEngine):
         initial_noise_multiplier = dyn_fun_param["initial_noise_multiplier"]
         super(DynamicPrivacyEngine, self).__init__(module, batch_size, sample_size, alphas, initial_noise_multiplier,
                                                    max_grad_norm, grad_norm_type, batch_dim,
-                                                   privacy_budget=privacy_budget, batch_type=batch_type)
+                                                   privacy_budget=privacy_budget, batch_type=batch_type,
+                                                   layer_wise_clip=layer_wise_clip)
         self.step_noise_multipliers = []
         self.accumulated_rdp = None
         if dynamic_sch_func is None:
