@@ -300,4 +300,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
             assert np.sum(np.abs(np.array(self.step_noise_multipliers[start:end]) - self.step_noise_multipliers[start])) < 1e-3, f"Step noise is not constant at epoch {epoch}."
 
     def get_privacy_spent(self, target_delta: float):
-        return tf_privacy.get_privacy_spent(self.alphas, self.accumulated_rdp, target_delta)
+        if self.accumulated_rdp is None:
+            return np.inf, np.nan
+        else:
+            return tf_privacy.get_privacy_spent(self.alphas, self.accumulated_rdp, target_delta)
