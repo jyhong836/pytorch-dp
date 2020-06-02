@@ -191,8 +191,14 @@ class PrivacyEngine:
 
 
 class NoiseScheduler(object):
+    def __init__(self):
+        self.stat = {}
+
     def __call__(self, t, param_dict):
         return param_dict['initial_noise_multiplier']
+
+    def update_stat(self, stat):
+        self.stat = stat
 
 
 class ExpDecaySch(NoiseScheduler):
@@ -209,6 +215,36 @@ class StepDecaySch(NoiseScheduler):
             # t and i_epoch both start from 0.
             t = np.floor(t * param_dict['sample_rate'])  # index of current epoch.
         return initial_noise_multiplier * (k ** (t // period))
+
+
+class ValDecaySch(NoiseScheduler):
+    def __init__(self):
+        super().__init__()
+        self.stat["noise_multiplier"] = None
+        self.stat["val_acc"] = None
+        self.initial_noise_multiplier = None
+        self.k = None
+        self.delta = 0.01
+        self.period = 10
+        self.epoch = 0
+
+    def __call__(self, t, initial_noise_multiplier=10., k=0.01, period=10, **param_dict):
+        if self.stat["noise_multiplier"] is None:
+            self.stat["noise_multiplier"] = initial_noise_multiplier
+            self.initial_noise_multiplier = initial_noise_multiplier
+            self.k = k
+            self.period = period
+        return self.stat["noise_multiplier"]
+
+    def update_stat(self, stat):
+        if self.epoch % self.period == 0:
+            if self.stat["val_acc"] is None:
+                self.stat["val_acc"] = stat["val_acc"]
+            else:
+                if stat["val_acc"] - self.stat["val_acc"] < self.delta:
+                    self.stat["noise_multiplier"] *= (1 - self.k)
+                self.stat["val_acc"] = stat["val_acc"]
+        self.epoch += 1
 
 
 class DynamicPrivacyEngine(PrivacyEngine):

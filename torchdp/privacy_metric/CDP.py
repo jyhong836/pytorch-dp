@@ -394,7 +394,8 @@ class ctCDP(tCDP):
     #     return ret
 
     # This value should be calibrated by MA. See privacy_metric_test.py: test_RS_sampling_valid.
-    SAMPLING_AMP_SCALE = 1.03
+    # SAMPLING_AMP_SCALE = 1.03
+    SAMPLING_AMP_SCALE = 2.
 
     def amp_by_sampling(self, sample_rate: float, batch_type="random") -> ctCDP:
         if sample_rate == 1.:
@@ -417,5 +418,5 @@ class ctCDP(tCDP):
 
     def deamp_by_sampling(self, sample_rate: float, batch_type="random") -> PrivacyMetric:
         assert batch_type == "random"
-        return ctCDP(rho=self.SAMPLING_AMP_SCALE * self.rho / (sample_rate ** 2))  # (13. * sample_rate ** 2))
+        return ctCDP(rho=self.rho / (self.SAMPLING_AMP_SCALE * sample_rate ** 2))  # (13. * sample_rate ** 2))
         # return ctCDP(rho=self.rho / (13. * sample_rate ** 2))
