@@ -101,15 +101,20 @@ class Stat:
         self.iter : int = 0
 
     def log(self, named_value: Any):
+        if self.aggr == 'sample':
+            # if aggr == 'avg', then the first single sample cannot make an average.
+            self._aggregate(named_value)
         if self.iter % self.report == 0:
             for k, v in self.named_value.items():
                 self.writer.add_scalar(
                     f'{self.type.name}:{self.name}/{k}', v, self.iter)
-        self._aggregate(named_value)
+        if self.aggr == 'avg':
+            self._aggregate(named_value)
 
     def _aggregate(self, named_value : Any):
         if self.aggr == 'sample':
-            self.named_values = named_value
+            for k, v in named_value.items():
+                self.named_value[k] = float(v)
         elif self.aggr == 'avg':
             for k, v in named_value.items():
                 self.named_value[k] = self.named_value[k] + float(v) / self.report\
