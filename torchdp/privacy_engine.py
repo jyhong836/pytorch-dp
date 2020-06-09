@@ -201,6 +201,15 @@ class NoiseScheduler(object):
         self.stat = stat
 
 
+class PredefinedSch(NoiseScheduler):
+    def __init__(self, sigmas):
+        super().__init__()
+        self._sigmas = sigmas
+
+    def __call__(self, t, **param_dict):
+        return self._sigmas[t]
+
+
 class ExpDecaySch(NoiseScheduler):
     def __call__(self, t, initial_noise_multiplier=10., k=0.01, **param_dict):
         if param_dict["batch_type"] == "shuffle":
