@@ -152,7 +152,12 @@ def _compute_rdp(q, sigma, alpha):
         return 0
 
     if q == 1.0:
-        return alpha / (2 * sigma ** 2)
+        if sigma > 0:
+            return alpha / (2 * sigma ** 2)
+        elif sigma == 0:
+            return np.inf
+        else:
+            raise ValueError(f"Sigma = {sigma}")
 
     if np.isinf(alpha):
         return np.inf

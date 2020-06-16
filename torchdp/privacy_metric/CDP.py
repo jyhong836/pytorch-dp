@@ -65,7 +65,12 @@ class zCDP(PrivacyMetric):
 
     @classmethod
     def from_sigma(cls, sigma, C=1.) -> zCDP:
-        return cls(rho=C ** 2 / 2. / sigma ** 2)
+        if sigma > 0:
+            return cls(rho=C ** 2 / 2. / sigma ** 2)
+        elif sigma == 0:
+            return cls(rho=np.inf)
+        else:
+            raise ValueError(f"Sigma < 0 as {sigma}")
 
     @classmethod
     def from_param_tuple(cls, params: Tuple) -> PrivacyMetric:
