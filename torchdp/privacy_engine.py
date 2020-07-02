@@ -105,7 +105,15 @@ class PrivacyEngine:
         )
 
         def dp_step(self, closure=None):
-            self.privacy_engine.step()
+            if closure is not None:
+                _closure = closure
+                def private_closure():
+                    orig_loss = _closure()
+                    self.privacy_engine.step()
+                    return orig_loss
+                closure = private_closure
+            else:
+                self.privacy_engine.step()
             self.original_step(closure)
 
         optimizer.privacy_engine = self
