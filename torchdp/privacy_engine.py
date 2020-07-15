@@ -210,12 +210,13 @@ class NoiseScheduler(object):
 
 
 class PredefinedSch(NoiseScheduler):
-    def __init__(self, sigmas):
+    def __init__(self, sigmas, sample_rate=1.):
         super().__init__()
         self._sigmas = sigmas
+        self.sample_rate = sample_rate
 
     def __call__(self, t, **param_dict):
-        return self._sigmas[t]
+        return self._sigmas[int(t*self.sample_rate)]
 
 
 class ExpDecaySch(NoiseScheduler):
