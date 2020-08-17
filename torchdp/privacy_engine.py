@@ -104,7 +104,7 @@ class PrivacyEngine:
             self.module, self.max_grad_norm, self.batch_dim, self.layer_wise_clip
         )
 
-        def dp_step(self, closure=None):
+        def dp_step(self, closure=None, disable_clip=False):
             if closure is not None:
                 _closure = closure
                 def private_closure():
@@ -113,7 +113,7 @@ class PrivacyEngine:
                     return orig_loss
                 closure = private_closure
             else:
-                self.privacy_engine.step()
+                self.privacy_engine.step(disable_clip=disable_clip)
             self.original_step(closure)
 
         optimizer.privacy_engine = self
@@ -170,20 +170,21 @@ class PrivacyEngine:
                 # print(cost, cost__)
         return self.noise_multiplier
 
-    def step(self):
+    def step(self, disable_clip=False):
         self.steps += 1
-        max_norm = self.clipper.step()
+        if not disable_clip:
+            max_norm = self.clipper.step()  # TODO move this out and make a accumulated clipper to save memory usage.
         noise_multiplier = self.request_budget()
         for p in self.module.parameters():
             if p.requires_grad and self.noise_multiplier > 0:
                 noise = torch.normal(
                     0,
-                    noise_multiplier * max_norm,
+                    noise_multiplier * self.clipper.true_max_norm,
                     p.grad.shape,
                     device=self.device,
                     generator=self.secure_generator,
                 )
-                p.grad += noise / self.clipper.batch_size
+                p.grad += noise / self.clipper.batch_size  # TODO Change the batch size to be accumulated?
 
     def to(self, device):
         self.device = device
@@ -302,13 +303,13 @@ class DynamicPrivacyEngine(PrivacyEngine):
         self.dyn_fun_param["batch_type"] = self.batch_type
         self.dyn_fun_param["sample_rate"] = self.sample_rate
 
-    def step(self):
+    def step(self, disable_clip=False):
         noise_multiplier = self.dynamic_sch_func(self.steps, **self.dyn_fun_param)
         old_noise_multiplier = self.noise_multiplier
         self.noise_multiplier = noise_multiplier
         try:
             # Try to apply the noise multiplier.
-            super().step()
+            super().step(disable_clip=disable_clip)
             self.record_step_noise_multiplier(self.noise_multiplier)
         except DPOutOfBudgetError as e:
             self.noise_multiplier = old_noise_multiplier

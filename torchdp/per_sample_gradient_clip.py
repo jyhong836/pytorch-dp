@@ -206,6 +206,7 @@ class PerSampleGradientClipper:
         self.module = module
         autograd_grad_sample.add_hooks(self.module)
         self.max_norm = max_norm
+        self.true_max_norm = max_norm  # the max norm according to clipping strategy.
         self.hooks_attached = True
         self.batch_dim = batch_dim
         self.layer_wise = layer_wise
@@ -234,5 +235,6 @@ class PerSampleGradientClipper:
             max_norm = clip_per_sample_layer_grad_norm_(self.module, self.max_norm)
         else:
             max_norm = clip_per_sample_grad_norm_(self.module, self.max_norm)
+        self.true_max_norm = max_norm
         autograd_grad_sample.clear_backprops(self.module)
         return max_norm
