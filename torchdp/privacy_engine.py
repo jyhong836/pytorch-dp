@@ -187,9 +187,6 @@ class PrivacyEngine:
         """Try to request an amount of budget based on current `noise_multiplier`. Call this
         before apply the noise to protect privacy.
 
-        Returns:
-            noise_multiplier: if request is approved.
-
         Raises:
             DPOutOfBudgetError: If residual budget is not enough
         """
@@ -206,9 +203,9 @@ class PrivacyEngine:
                 # diff = self.privacy_budget.compose([self._accumulate_cost, self._residual_budget]) - self.privacy_budget
                 # assert(abs(diff.rho) < 1e-15)
                 # print(self.privacy_budget.from_sigma(self.noise_multiplier))
-                cost__ = self.privacy_budget.from_sigma(self.noise_multiplier).amp_by_sampling(self.sample_rate, batch_type=self.batch_type)
+                # cost__ = self.privacy_budget.from_sigma(self.noise_multiplier).amp_by_sampling(self.sample_rate, batch_type=self.batch_type)
                 # print(cost, cost__)
-        return self.noise_multiplier
+        # return self.noise_multiplier
 
     def step(self):
         self.steps += 1
@@ -234,6 +231,7 @@ class PrivacyEngine:
             )
 
         params = (p for p in self.module.parameters() if p.requires_grad)
+        self.request_budget()  # raise error if request is rejected.
         for p, clip_value in zip(params, clip_values):
             noise = self._generate_noise(clip_value, p)
             if self.loss_reduction == "mean":
@@ -256,11 +254,10 @@ class PrivacyEngine:
         self.clipper.clip_and_accumulate()
 
     def _generate_noise(self, max_norm, parameter):
-        noise_multiplier = self.request_budget()
-        if noise_multiplier > 0:
+        if self.noise_multiplier > 0:
             return torch.normal(
                 0,
-                noise_multiplier * max_norm,
+                self.noise_multiplier * max_norm,
                 parameter.grad.shape,
                 device=self.device,
                 generator=self.secure_generator,

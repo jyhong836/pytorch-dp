@@ -6,6 +6,7 @@ from typing import List
 from .privacy_metric import PrivacyMetric, DPOutOfBudgetError
 from . import privacy_analysis as tf_privacy
 from .privacy_engine import PrivacyEngine
+from .utils import stats
 
 class NoiseScheduler(object):
     def __init__(self):
@@ -85,7 +86,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
         alphas: List[float],
         max_grad_norm: float,
         grad_norm_type: int = 2,
-        batch_dim: int = 0,
+        batch_first: bool = True,
         privacy_budget: PrivacyMetric = None,
         batch_type: str = "shuffle",
         layer_wise_clip: bool = False,
@@ -102,7 +103,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
         """
         initial_noise_multiplier = dyn_fun_param["initial_noise_multiplier"]
         super(DynamicPrivacyEngine, self).__init__(module, batch_size, sample_size, alphas, initial_noise_multiplier,
-                                                   max_grad_norm, grad_norm_type, batch_dim,
+                                                   max_grad_norm, grad_norm_type, batch_first,
                                                    privacy_budget=privacy_budget, batch_type=batch_type,
                                                    layer_wise_clip=layer_wise_clip)
         self.step_noise_multipliers = []
@@ -115,14 +116,14 @@ class DynamicPrivacyEngine(PrivacyEngine):
         self.dyn_fun_param["batch_type"] = self.batch_type
         self.dyn_fun_param["sample_rate"] = self.sample_rate
 
-    def step(self, disable_clip=False):
+    def step(self):
         noise_multiplier = self.dynamic_sch_func(
             self.steps, **self.dyn_fun_param)
         old_noise_multiplier = self.noise_multiplier
         self.noise_multiplier = noise_multiplier
         try:
             # Try to apply the noise multiplier.
-            super().step(disable_clip=disable_clip)
+            super().step()
             self.record_step_noise_multiplier(self.noise_multiplier)
         except DPOutOfBudgetError as e:
             self.noise_multiplier = old_noise_multiplier
