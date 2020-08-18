@@ -318,11 +318,12 @@ class DynamicPrivacyEngine(PrivacyEngine):
     def record_step_noise_multiplier(self, noise_multiplier):
         self.step_noise_multipliers += [self.noise_multiplier]  # record noise multiplier.
         stats.update(stats.StatType.PRIVACY, 'AllLayers', noise_multiplier=self.noise_multiplier)
-        step_rdp = tf_privacy.compute_rdp(self.sample_rate, noise_multiplier, 1, self.alphas)
-        if self.accumulated_rdp is None:
-            self.accumulated_rdp = step_rdp
-        else:
-            self.accumulated_rdp = step_rdp + self.accumulated_rdp
+        # TODO try to disable this?
+        # step_rdp = tf_privacy.compute_rdp(self.sample_rate, noise_multiplier, 1, self.alphas)
+        # if self.accumulated_rdp is None:
+        #     self.accumulated_rdp = step_rdp
+        # else:
+        #     self.accumulated_rdp = step_rdp + self.accumulated_rdp
 
     def get_renyi_divergence(self):
         # TODO use this to verify the dynamic.
