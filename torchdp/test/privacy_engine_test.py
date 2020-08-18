@@ -2,20 +2,20 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import unittest
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchdp import PrivacyEngine, utils
+from torchdp import PrivacyEngine
 from torchdp.dp_model_inspector import IncompatibleModuleException
+from torchdp.utils.module_inspection import get_layer_type, requires_grad
 from torchvision import models, transforms
 from torchvision.datasets import FakeData
 
 
-def is_grad_sample_consistent(tensor: torch.Tensor, loss_type: str = "mean"):
-    if tensor.grad is None:
-        return True
-
+def get_grad_sample_aggregated(tensor: torch.Tensor, loss_type: str = "mean"):
+    # pyre-fixme[16]: `Tensor` has no attribute `grad_sample`.
     if tensor.grad_sample is None:
         raise ValueError(
             f"The input tensor {tensor} has grad computed, but missing grad_sample."
@@ -30,7 +30,7 @@ def is_grad_sample_consistent(tensor: torch.Tensor, loss_type: str = "mean"):
         b_sz = tensor.grad_sample.shape[0]
         grad_sample_aggregated /= b_sz
 
-    return torch.allclose(tensor.grad, grad_sample_aggregated, atol=10e-5, rtol=10e-2)
+    return grad_sample_aggregated
 
 
 class SampleConvNet(nn.Module):
@@ -99,7 +99,7 @@ class PrivacyEngine_test(unittest.TestCase):
         self.private_grads_norms = self.setUp_model_step(
             self.private_model, self.private_optimizer
         )
-        self.privacy_default_params = {'noise_multiplier' : 1.0, 'max_grad_norm' : 1}
+        self.privacy_default_params = {"noise_multiplier": 1.0, "max_grad_norm": 1}
 
     def setUp_data(self):
         self.ds = FakeData(
@@ -112,7 +112,9 @@ class PrivacyEngine_test(unittest.TestCase):
         )
         self.dl = DataLoader(self.ds, batch_size=self.BATCH_SIZE)
 
-    def setUp_init_model(self, private=False, state_dict=None, model=None, **privacy_engine_kwargs):
+    def setUp_init_model(
+        self, private=False, state_dict=None, model=None, **privacy_engine_kwargs
+    ):
         model = model or SampleConvNet()
         optimizer = torch.optim.SGD(model.parameters(), lr=self.LR, momentum=0)
         if state_dict:
@@ -140,9 +142,19 @@ class PrivacyEngine_test(unittest.TestCase):
             loss = self.criterion(logits, y)
             loss.backward()
             optimizer.step()
+
         return torch.stack(
             [p.grad.norm() for p in model.parameters() if p.requires_grad], dim=-1
         )
+
+    def test_throws_on_bad_per_layer_maxnorm_size(self):
+        model, optimizer = self.setUp_init_model(
+            private=True, noise_multiplier=0.1, max_grad_norm=[999] * 10
+        )
+        # there are a total of 18 parameters sets, [bias, weight] * 9 layers
+        # the provided max_grad_norm is not either a scalar or a list of size 18
+        with self.assertRaises(ValueError):
+            self.setUp_model_step(model, optimizer)
 
     def test_throws_double_attach(self):
         model, optimizer = self.setUp_init_model(private=True)
@@ -194,8 +206,8 @@ class PrivacyEngine_test(unittest.TestCase):
         Test that gradients are different after one step of SGD
         """
         for layer_grad, private_layer_grad in zip(
-            [p for p in self.original_model.parameters() if p.requires_grad],
-            [p for p in self.private_model.parameters() if p.requires_grad],
+            [p.grad for p in self.original_model.parameters() if p.requires_grad],
+            [p.grad for p in self.private_model.parameters() if p.requires_grad],
         ):
             self.assertFalse(torch.allclose(layer_grad, private_layer_grad))
 
@@ -216,18 +228,43 @@ class PrivacyEngine_test(unittest.TestCase):
             noise_multiplier=0,
             max_grad_norm=999,
         )
-        self.setUp_model_step(model, optimizer)
+
+        grad_sample_aggregated = {}
+
+        for x, y in self.dl:
+            optimizer.zero_grad()
+            logits = model(x)
+            loss = self.criterion(logits, y)
+            loss.backward()
+
+            # collect all per-sample gradients before we take the step
+            for _, layer in model.named_modules():
+                if get_layer_type(layer) == "SampleConvNet":
+                    continue
+
+                grad_sample_aggregated[layer] = {}
+                for p in layer.parameters():
+                    if p.requires_grad:
+                        grad_sample_aggregated[layer][p] = get_grad_sample_aggregated(p)
+
+            optimizer.step()
 
         for layer_name, layer in model.named_modules():
-            if utils.get_layer_type(layer) == "SampleConvNet":
+            if get_layer_type(layer) == "SampleConvNet":
                 continue
 
-            for param_tensor in layer.parameters():
-                self.assertTrue(
-                    is_grad_sample_consistent(param_tensor),
-                    f"grad_sample doesn't match grad. "
-                    f"Layer: {layer_name}, Tensor: {param_tensor.shape}",
-                )
+            for p in layer.parameters():
+                if p.requires_grad:
+                    self.assertTrue(
+                        torch.allclose(
+                            p.grad,
+                            grad_sample_aggregated[layer][p],
+                            atol=10e-5,
+                            rtol=10e-2,
+                        ),
+                        f"grad_sample doesn't match grad. "
+                        f"Layer: {layer_name}, Tensor: {p.shape}",
+                    )
 
     def test_grad_matches_original(self):
         original_model, orignial_optimizer = self.setUp_init_model()
@@ -243,7 +280,36 @@ class PrivacyEngine_test(unittest.TestCase):
             self.setUp_model_step(private_model, private_optimizer)
 
         for layer_name, private_layer in private_model.named_children():
-            if not utils.requires_grad(private_layer):
+            if not requires_grad(private_layer):
+                continue
+
+            original_layer = getattr(original_model, layer_name)
+
+            for layer, private_layer in zip(
+                [p.grad for p in original_layer.parameters() if p.requires_grad],
+                [p.grad for p in private_layer.parameters() if p.requires_grad],
+            ):
+                self.assertTrue(
+                    torch.allclose(layer, private_layer, atol=10e-4, rtol=10e-2),
+                    f"Layer: {layer_name}. Private gradients with noise 0 doesn't match original",
+                )
+
+    def test_grad_matches_original_per_layer_clipping(self):
+        original_model, orignial_optimizer = self.setUp_init_model()
+        private_model, private_optimizer = self.setUp_init_model(
+            private=True,
+            state_dict=original_model.state_dict(),
+            noise_multiplier=0,
+            max_grad_norm=[999] * 18,
+            clip_per_layer=True,
+        )
+
+        for _ in range(3):
+            self.setUp_model_step(original_model, orignial_optimizer)
+            self.setUp_model_step(private_model, private_optimizer)
+
+        for layer_name, private_layer in private_model.named_children():
+            if not requires_grad(private_layer):
                 continue
 
             original_layer = getattr(original_model, layer_name)
@@ -297,3 +363,61 @@ class PrivacyEngine_test(unittest.TestCase):
         )
         with self.assertRaises(IncompatibleModuleException):
             privacy_engine.attach(self.private_optimizer)
+
+    def test_deterministic_run(self):
+        """
+        Tests that for 2 different models, secure seed can be fixed
+        to produce same (deterministic) runs.
+        """
+        model1, optimizer1 = self.setUp_init_model(private=True)
+        model2, optimizer2 = self.setUp_init_model(
+            private=True, state_dict=model1.state_dict()
+        )
+        # assert the models are identical initially
+        first_model_params = [p for p in model1.parameters() if p.requires_grad]
+        second_model_params = [p for p in model2.parameters() if p.requires_grad]
+        for p0, p1 in zip(first_model_params, second_model_params):
+            self.assertTrue(torch.allclose(p0, p1))
+
+        optimizer1.privacy_engine._set_seed(10)
+        self.setUp_model_step(model1, optimizer1)
+
+        optimizer2.privacy_engine._set_seed(10)
+        self.setUp_model_step(model2, optimizer2)
+        # assert the models are identical after we did one step
+        first_model_params = (p for p in model1.parameters() if p.requires_grad)
+        second_model_params = (p for p in model2.parameters() if p.requires_grad)
+        for p0, p1 in zip(first_model_params, second_model_params):
+            self.assertTrue(torch.allclose(p0, p1))
+
+    def test_deterministic_noise_generation(self):
+        """
+        Tests that when secure seed is set for a model, the sequence
+        of the generated noise is the same.
+        It performs the following test:
+        1- Initiate a model, do one step, set the seed, and save the noise sequence
+        2- Do 3 more steps, set the seed, and save the noise sequnece
+        The two noise sequences should be the same, because the seed has been set
+        prior to calling the noise generation each time
+        """
+        max_norm = 5
+        model, optimizer = self.setUp_init_model(private=True)
+        self.setUp_model_step(model, optimizer)  # do one step so we have gradiants
+        model_params = [p for p in model.parameters() if p.requires_grad]
+
+        optimizer.privacy_engine._set_seed(20)
+        noise_generated_before = [
+            optimizer.privacy_engine._generate_noise(max_norm, p).detach().numpy()
+            for p in model_params
+        ]
+
+        for _ in range(3):
+            self.setUp_model_step(model, optimizer)
+
+        optimizer.privacy_engine._set_seed(20)
+        noise_generated_after = [
+            optimizer.privacy_engine._generate_noise(max_norm, p).detach().numpy()
+            for p in model_params
+        ]
+
+        np.testing.assert_equal(noise_generated_before, noise_generated_after)

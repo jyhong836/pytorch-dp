@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchdp import PerSampleGradientClipper
+from torchdp.utils.clipping import ConstantFlatClipper, ConstantPerLayerClipper
 from torchvision import transforms
 from torchvision.datasets import FakeData
 
@@ -79,13 +80,20 @@ class PerSampleGradientClipper_test(unittest.TestCase):
         self.clipped_model.load_state_dict(self.original_model.state_dict())  # fill it
 
         # Intentionally clipping to a very small value
-        self.clipper = PerSampleGradientClipper(self.clipped_model, clip_value)
+        norm_clipper = (
+            ConstantFlatClipper(clip_value)
+            if not isinstance(clip_value, list)
+            else ConstantPerLayerClipper(clip_value)
+        )
+        self.clipper = PerSampleGradientClipper(self.clipped_model, norm_clipper)
+
         for x, y in self.dl:
             logits = self.clipped_model(x)
             loss = self.criterion(logits, y)
             loss.backward()  # puts grad in self.clipped_model.parameters()
             if run_clipper_step:
-                self.clipper.step()
+                self.clipper.clip_and_accumulate()
+                self.clipper.pre_step()
         self.clipped_grads_norms = torch.stack(
             [p.grad.norm() for p in self.clipped_model.parameters() if p.requires_grad],
             dim=-1,
@@ -100,6 +108,17 @@ class PerSampleGradientClipper_test(unittest.TestCase):
         ):
             self.assertLess(float(clipped_layer_norm), float(original_layer_norm))
 
+    def test_clipped_grad_norm_is_smaller_perlayer(self):
+        """
+        Test that grad are clipped and their value changes
+        """
+        # there are 8 parameter sets [bias, weight] * [conv1, conv2, fc1, fc2]
+        self.setUp_clipped_model(clip_value=[0.001] * 8)
+        for original_layer_norm, clipped_layer_norm in zip(
+            self.original_grads_norms, self.clipped_grads_norms
+        ):
+            self.assertLess(float(clipped_layer_norm), float(original_layer_norm))
+
     def test_clipped_grad_norms_not_zero(self):
         """
         Test that grads aren't killed by clipping
@@ -107,9 +126,26 @@ class PerSampleGradientClipper_test(unittest.TestCase):
         allzeros = torch.zeros_like(self.clipped_grads_norms)
         self.assertFalse(torch.allclose(self.clipped_grads_norms, allzeros))
 
+    def test_clipped_grad_norms_not_zero_per_layer(self):
+        """
+        Test that grads aren't killed by clipping
+        """
+        # there are 8 parameter sets [bias, weight] * [conv1, conv2, fc1, fc2]
+        self.setUp_clipped_model(clip_value=[0.001] * 8)
+        allzeros = torch.zeros_like(self.clipped_grads_norms)
+        self.assertFalse(torch.allclose(self.clipped_grads_norms, allzeros))
+
     def test_clipping_to_high_value_does_nothing(self):
         self.setUp_clipped_model(
             clip_value=9999, run_clipper_step=True
+        )  # should be a no-op
+        self.assertTrue(
+            torch.allclose(self.original_grads_norms, self.clipped_grads_norms)
+        )
+
+    def test_clipping_to_high_value_does_nothing_per_layer(self):
+        self.setUp_clipped_model(
+            clip_value=[9999] * 8, run_clipper_step=True
         )  # should be a no-op
         self.assertTrue(
             torch.allclose(self.original_grads_norms, self.clipped_grads_norms)

@@ -8,17 +8,17 @@ import setuptools
 
 src_dir = os.path.abspath(os.path.dirname(__file__))
 
-with open("README.md", "r") as fh:
+with open("README.md", "r", encoding="utf8") as fh:
     long_description = fh.read()
 
 requirements_txt = os.path.join(src_dir, "requirements.txt")
-with open("requirements.txt") as f:
+with open("requirements.txt", encoding="utf8") as f:
     required = f.read().splitlines()
 
 
 setuptools.setup(
     name="pytorch-dp",
-    version="0.1",
+    version="0.1-beta.1",
     author="PyTorch Team",
     description="Train PyTorch models with Differential Privacy",
     long_description=long_description,

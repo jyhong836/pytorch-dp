@@ -4,7 +4,7 @@
 from torch import nn
 
 from .autograd_grad_sample import is_supported
-from .utils import ModelInspector, get_layer_type, requires_grad
+from .utils.module_inspection import ModelInspector, get_layer_type, requires_grad
 
 
 class IncompatibleModuleException(Exception):
@@ -36,6 +36,7 @@ class DPModelInspector:
         def is_valid(module: nn.Module):
             valid = (not requires_grad(module)) or is_supported(module)
             if valid and isinstance(module, nn.Conv2d):
+                # pyre-fixme[16]: `Conv2d` has no attribute `in_channels`.
                 valid = module.groups == 1 or module.groups == module.in_channels
             return valid
 
@@ -55,6 +56,7 @@ class DPModelInspector:
             return (
                 not is_instancenorm
                 or not requires_grad(module)
+                # pyre-fixme[16]: `Module` has no attribute `track_running_stats`.
                 or not module.track_running_stats
             )
 
@@ -81,6 +83,7 @@ class DPModelInspector:
             ),
         ]
 
+    # pyre-fixme[31]: Expression `True` is not a valid type.
     def validate(self, model: nn.Module) -> True:
         """
         Runs the existing `inspectors` on all the sub-modules of the model. Returns

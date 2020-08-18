@@ -2,8 +2,8 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import os
 import types
-from typing import List
-import numpy as np
+import warnings
+from typing import List, Union
 
 import torch
 from torch import nn
@@ -11,10 +11,8 @@ from torch import nn
 from .privacy_metric import PrivacyMetric, DPOutOfBudgetError
 from . import privacy_analysis as tf_privacy
 from .dp_model_inspector import DPModelInspector
-from . import stats
-from .per_sample_gradient_clip import (
-    PerSampleGradientClipper,
-    __clip_value_calculation_params__ as clipping_method)
+from .per_sample_gradient_clip import PerSampleGradientClipper
+from .utils import clipping
 
 
 class PrivacyEngine:
@@ -25,12 +23,14 @@ class PrivacyEngine:
         sample_size: int,
         alphas: List[float],
         noise_multiplier: float,
-        max_grad_norm: float,
+        max_grad_norm: Union[float, List[float]],
         grad_norm_type: int = 2,
-        batch_dim: int = 0,
+        batch_first: bool = True,
         privacy_budget: PrivacyMetric = None,
         batch_type: str = "shuffle",
-        layer_wise_clip: bool = False,
+        target_delta: float = 1e-8,
+        loss_reduction: str = "mean",
+        **misc_settings,
     ):
         """
 
@@ -52,33 +52,34 @@ class PrivacyEngine:
         self.alphas = alphas
         self.device = next(module.parameters()).device
 
+        self.batch_size = batch_size
         self.sample_rate = batch_size / sample_size
         self.noise_multiplier = noise_multiplier
         self.max_grad_norm = max_grad_norm
         self.grad_norm_type = grad_norm_type
-        self.batch_dim = batch_dim
+        self.batch_first = batch_first
+        self.target_delta = target_delta
+
         self.privacy_budget = privacy_budget
         # self.n_batches_per_epoch = n_batches_per_epoch  # this will be estimated by `1/self.sample_rate`
         self.batch_type = batch_type
-        self.layer_wise_clip = layer_wise_clip
         if privacy_budget is not None:
             self._residual_budget = privacy_budget
-            # self._accumulate_cost = privacy_budget.zero()
 
-        self.secure_seed = int.from_bytes(os.urandom(8), byteorder="big", signed=True)
-        self.secure_generator = (
-            torch.random.manual_seed(self.secure_seed)
-            if self.device.type == "cpu"
-            else torch.cuda.manual_seed(self.secure_seed)
-        )
+        # pyre-fixme[6]: Expected `int` for 1st param but got `None`.
+        self._set_seed(None)
         self.validator = DPModelInspector()
         self.clipper: PerSampleGradientClipper = None  # lazy initialization in attach
+        self.misc_settings = misc_settings
+
+        self.loss_reduction = loss_reduction
 
     def detach(self):
         optim = self.optimizer
         optim.privacy_engine = None
         self.clipper.close()
         optim.step = types.MethodType(optim.original_step, optim)
+        del optim.virtual_step
 
     def attach(self, optimizer: torch.optim.Optimizer):
         """
@@ -90,21 +91,39 @@ class PrivacyEngine:
         2. Adds a pointer to this object (the PrivacyEngine) inside the optimizer
         3. Moves the original optimizer's `step()` function to `original_step()`
         4. Monkeypatches the optimizer's `step()` function to call `step()` on
-        the query engine automatically whenever it would call `step()` for itself
+           the query engine automatically whenever it would call `step()` for itself
         """
 
         # Validate the model for not containing un-supported modules.
         self.validator.validate(self.module)
         # only attach if model is validated
-        if clipping_method['method'].lower() != 'none':
-            print('Warning! Current implementations of dynamic clipping '
-                  'are not privacy safe; Caclulated privacy loss is not '
-                  'indicative of a proper bound.')
-        self.clipper = PerSampleGradientClipper(
-            self.module, self.max_grad_norm, self.batch_dim, self.layer_wise_clip
+        norm_clipper = (
+            # pyre-fixme[6]: Expected `float` for 1st param but got
+            #  `Union[List[float], float]`.
+            clipping.ConstantFlatClipper(self.max_grad_norm)
+            if not isinstance(self.max_grad_norm, list)
+            # pyre-fixme[6]: Expected `List[float]` for 1st param but got
+            #  `Union[List[float], float]`.
+            else clipping.ConstantPerLayerClipper(self.max_grad_norm)
         )
 
-        def dp_step(self, closure=None, disable_clip=False):
+        if self.misc_settings.get("experimental", False):
+            norm_clipper = clipping._Dynamic_Clipper_(
+                # pyre-fixme[6]: Expected `List[float]` for 1st param but got
+                #  `List[Union[List[float], float]]`.
+                [self.max_grad_norm],
+                self.misc_settings.get("clip_per_layer", False),
+                self.misc_settings.get(
+                    "clipping_method", clipping.ClippingMethod.STATIC
+                ),
+                self.misc_settings.get("ratio", 0.0),
+            )
+
+        self.clipper = PerSampleGradientClipper(
+            self.module, norm_clipper, self.batch_first
+        )
+
+        def dp_step(self, closure=None):
             if closure is not None:
                 _closure = closure
                 def private_closure():
@@ -113,13 +132,31 @@ class PrivacyEngine:
                     return orig_loss
                 closure = private_closure
             else:
-                self.privacy_engine.step(disable_clip=disable_clip)
+                self.privacy_engine.step()
             self.original_step(closure)
 
+        # pyre-fixme[16]: `Optimizer` has no attribute `privacy_engine`.
         optimizer.privacy_engine = self
+        # pyre-fixme[16]: `Optimizer` has no attribute `original_step`.
         optimizer.original_step = optimizer.step
+        # pyre-fixme[8]: Attribute has type
+        #  `BoundMethod[typing.Callable(torch.optim.Optimizer.step)[[Named(self,
+        #  torch.optim.Optimizer), Named(closure, typing.Optional[typing.Callable[[],
+        #  torch.Tensor]], default)], typing.Optional[torch.Tensor]],
+        #  torch.optim.Optimizer]`; used as `MethodType`.
         optimizer.step = types.MethodType(dp_step, optimizer)
 
+        # We add a 'virtual_step' function to the optimizer, which
+        # enables the use of virtual batches.
+        # By repeatedly computing backward passes and calling virtual_step,
+        # we can aggregate the clipped gradient for large batches
+        def virtual_step(self):
+            self.privacy_engine.virtual_step()
+
+        # pyre-fixme[16]: `Optimizer` has no attribute `virtual_step`.
+        optimizer.virtual_step = types.MethodType(virtual_step, optimizer)
+
+        # pyre-fixme[16]: `PrivacyEngine` has no attribute `optimizer`.
         self.optimizer = optimizer  # create a cross reference for detaching
 
     def get_renyi_divergence(self):
@@ -130,10 +167,13 @@ class PrivacyEngine:
         )
         return rdp
 
-    def get_privacy_spent(self, target_delta: float):
+    # pyre-fixme[9]: target_delta has type `float`; used as `None`.
+    def get_privacy_spent(self, target_delta: float = None):
         """Compute the exact privacy spent by Moment Accountant.
         TODO Add analytical DP accountant which will be more precise.
         """
+        if target_delta is None:
+            target_delta = self.target_delta
         rdp = self.get_renyi_divergence() * self.steps
         return tf_privacy.get_privacy_spent(self.alphas, rdp, target_delta)
 
@@ -170,21 +210,35 @@ class PrivacyEngine:
                 # print(cost, cost__)
         return self.noise_multiplier
 
-    def step(self, disable_clip=False):
+    def step(self):
         self.steps += 1
-        if not disable_clip:
-            max_norm = self.clipper.step()  # TODO move this out and make a accumulated clipper to save memory usage.
-        noise_multiplier = self.request_budget()
-        for p in self.module.parameters():
-            if p.requires_grad and self.noise_multiplier > 0:
-                noise = torch.normal(
-                    0,
-                    noise_multiplier * self.clipper.true_max_norm,
-                    p.grad.shape,
-                    device=self.device,
-                    generator=self.secure_generator,
-                )
-                p.grad += noise / self.clipper.batch_size  # TODO Change the batch size to be accumulated?
+        self.clipper.clip_and_accumulate()
+        clip_values, batch_size = self.clipper.pre_step()
+
+        # ensure the clipper consumed the right amount of gradients.
+        # In the last batch of a training epoch, we might get a batch that is
+        # smaller than others but we should never get a batch that is too large
+        if batch_size > self.batch_size:
+            raise ValueError(
+                f"PrivacyEngine expected a batch of size {self.batch_size} "
+                f"but received a batch of size {batch_size}"
+            )
+
+        if batch_size < self.batch_size:
+            warnings.warn(
+                f"PrivacyEngine expected a batch of size {self.batch_size} "
+                f"but the last step received a batch of size {batch_size}. "
+                "This means that the privacy analysis will be a bit more "
+                "pessimistic. You can set `drop_last = True` in your PyTorch "
+                "dataloader to avoid this problem completely"
+            )
+
+        params = (p for p in self.module.parameters() if p.requires_grad)
+        for p, clip_value in zip(params, clip_values):
+            noise = self._generate_noise(clip_value, p)
+            if self.loss_reduction == "mean":
+                noise /= batch_size
+            p.grad += noise
 
     def to(self, device):
         self.device = device
@@ -197,166 +251,32 @@ class PrivacyEngine:
             return f"residual budget = {self._residual_budget:3g}/{self.privacy_budget:3g}"
         else:
             return self._residual_budget
+    
+    def virtual_step(self):
+        self.clipper.clip_and_accumulate()
 
+    def _generate_noise(self, max_norm, parameter):
+        noise_multiplier = self.request_budget()
+        if noise_multiplier > 0:
+            return torch.normal(
+                0,
+                noise_multiplier * max_norm,
+                parameter.grad.shape,
+                device=self.device,
+                generator=self.secure_generator,
+            )
+        return 0.0
 
-class NoiseScheduler(object):
-    def __init__(self):
-        self.stat = {}
-
-    def __call__(self, t, param_dict):
-        return param_dict['initial_noise_multiplier']
-
-    def update_stat(self, stat):
-        self.stat = stat
-
-
-class PredefinedSch(NoiseScheduler):
-    def __init__(self, sigmas, sample_rate=1.):
-        super().__init__()
-        self._sigmas = sigmas
-        self.sample_rate = sample_rate
-
-    def __call__(self, t, **param_dict):
-        return self._sigmas[int(t*self.sample_rate)]
-
-
-class ExpDecaySch(NoiseScheduler):
-    def __call__(self, t, initial_noise_multiplier=10., k=0.01, **param_dict):
-        if param_dict["batch_type"] == "shuffle":
-            # t and i_epoch both start from 0.
-            t = np.floor(t * param_dict['sample_rate'])  # index of current epoch.
-        return initial_noise_multiplier * np.exp(- k * t)
-
-
-class StepDecaySch(NoiseScheduler):
-    def __call__(self, t, initial_noise_multiplier=10., k=0.6, period=10, **param_dict):
-        if param_dict["batch_type"] == "shuffle":
-            # t and i_epoch both start from 0.
-            t = np.floor(t * param_dict['sample_rate'])  # index of current epoch.
-        return initial_noise_multiplier * (k ** (t // period))
-
-
-class ValDecaySch(NoiseScheduler):
-    def __init__(self):
-        super().__init__()
-        self.stat["noise_multiplier"] = None
-        self.stat["val_acc"] = None
-        self.initial_noise_multiplier = None
-        self.k = None
-        self.delta = 0.01
-        self.period = 10
-        self.epoch = 0
-
-    def __call__(self, t, initial_noise_multiplier=10., k=0.01, period=10, **param_dict):
-        if self.stat["noise_multiplier"] is None:
-            self.stat["noise_multiplier"] = initial_noise_multiplier
-            self.initial_noise_multiplier = initial_noise_multiplier
-            self.k = k
-            self.period = period
-        return self.stat["noise_multiplier"]
-
-    def update_stat(self, stat):
-        if self.epoch % self.period == 0:
-            if self.stat["val_acc"] is None:
-                self.stat["val_acc"] = stat["val_acc"]
-            else:
-                if stat["val_acc"] - self.stat["val_acc"] < self.delta:
-                    self.stat["noise_multiplier"] *= (1 - self.k)
-                self.stat["val_acc"] = stat["val_acc"]
-        self.epoch += 1
-
-
-class DynamicPrivacyEngine(PrivacyEngine):
-    def __init__(
-        self,
-        module: nn.Module,
-        batch_size: int,
-        sample_size: int,
-        alphas: List[float],
-        max_grad_norm: float,
-        grad_norm_type: int = 2,
-        batch_dim: int = 0,
-        privacy_budget: PrivacyMetric = None,
-        batch_type: str = "shuffle",
-        layer_wise_clip: bool = False,
-        dynamic_sch_func: NoiseScheduler = None,  # e.g., lambda t, param_dict: 10. (return constant).
-        **dyn_fun_param
-    ):
-        """
-        Args:
-            dyn_fun_param: Dict of parameters for dynamic_sch_func. Possible params which depends on the sch_func:
-                dynamic_interval: The step interval for updating noise multiplier. Use this to make epoch-wise
-                    schedule. For example, set it to be the number of batch in one epoch.
-                initial_noise_multiplier: The initial noise.
-        """
-        initial_noise_multiplier = dyn_fun_param["initial_noise_multiplier"]
-        super(DynamicPrivacyEngine, self).__init__(module, batch_size, sample_size, alphas, initial_noise_multiplier,
-                                                   max_grad_norm, grad_norm_type, batch_dim,
-                                                   privacy_budget=privacy_budget, batch_type=batch_type,
-                                                   layer_wise_clip=layer_wise_clip)
-        self.step_noise_multipliers = []
-        self.accumulated_rdp = None
-        if dynamic_sch_func is None:
-            def dynamic_sch_func(t, param_dict): return dyn_fun_param["initial_noise_multiplier"]
-        self.dynamic_sch_func = dynamic_sch_func
-        self.dyn_fun_param = dyn_fun_param
-        self.dyn_fun_param["batch_type"] = self.batch_type
-        self.dyn_fun_param["sample_rate"] = self.sample_rate
-
-    def step(self, disable_clip=False):
-        noise_multiplier = self.dynamic_sch_func(self.steps, **self.dyn_fun_param)
-        old_noise_multiplier = self.noise_multiplier
-        self.noise_multiplier = noise_multiplier
-        try:
-            # Try to apply the noise multiplier.
-            super().step(disable_clip=disable_clip)
-            self.record_step_noise_multiplier(self.noise_multiplier)
-        except DPOutOfBudgetError as e:
-            self.noise_multiplier = old_noise_multiplier
-            raise e
-
-    def record_step_noise_multiplier(self, noise_multiplier):
-        self.step_noise_multipliers += [self.noise_multiplier]  # record noise multiplier.
-        stats.update(stats.StatType.PRIVACY, 'AllLayers', noise_multiplier=self.noise_multiplier)
-        # TODO try to disable this?
-        # step_rdp = tf_privacy.compute_rdp(self.sample_rate, noise_multiplier, 1, self.alphas)
-        # if self.accumulated_rdp is None:
-        #     self.accumulated_rdp = step_rdp
-        # else:
-        #     self.accumulated_rdp = step_rdp + self.accumulated_rdp
-
-    def get_renyi_divergence(self):
-        # TODO use this to verify the dynamic.
-        # self.validate_noise_dynamic()
-        step_rdps = torch.tensor(
-            [tf_privacy.compute_rdp(
-                self.sample_rate, noise_multiplier, 1, self.alphas
-            ) for noise_multiplier in self.step_noise_multipliers]
-        )
-        # print(step_rdps.shape)  # [n_batch, n_alpha]
-        return step_rdps
-
-    def validate_noise_dynamic(self):
-        """Check the step noise multipliers in current epoch. This will also check if the
-        batch round the number of samples by examining the sample_rate."""
-        # FIXME this will be very inefficient to do in steps.
-        if self.batch_type == "shuffle":
-            # TODO check epoch-wise constant noise.
-            n_batchs_per_epoch = 1/self.sample_rate
-            assert n_batchs_per_epoch.is_integer(), "Number of batch is not integer. Try to " \
-                                                    "select batch size to round the data size."
-            n_batchs_per_epoch = int(n_batchs_per_epoch)
-            T = len(self.step_noise_multipliers) - 1
-            if T + 1 < n_batchs_per_epoch:
-                return
-            epoch = int(np.floor(T * self.sample_rate))
-            start = epoch*n_batchs_per_epoch
-            end = np.minimum((epoch+1)*n_batchs_per_epoch, T)
-            # print(start, len(self.step_noise_multipliers), T)
-            assert np.sum(np.abs(np.array(self.step_noise_multipliers[start:end]) - self.step_noise_multipliers[start])) < 1e-3, f"Step noise is not constant at epoch {epoch}."
-
-    def get_privacy_spent(self, target_delta: float):
-        if self.accumulated_rdp is None:
-            return np.inf, np.nan
+    def _set_seed(self, secure_seed: int):
+        if secure_seed is not None:
+            # pyre-fixme[16]: `PrivacyEngine` has no attribute `secure_seed`.
+            self.secure_seed = secure_seed
         else:
-            return tf_privacy.get_privacy_spent(self.alphas, self.accumulated_rdp, target_delta)
+            self.secure_seed = int.from_bytes(
+                os.urandom(8), byteorder="big", signed=True
+            )
+        self.secure_generator = (
+            torch.random.manual_seed(self.secure_seed)
+            if self.device.type == "cpu"
+            else torch.cuda.manual_seed(self.secure_seed)
+        )

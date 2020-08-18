@@ -1,10 +1,12 @@
 # pytorch-dp: Train PyTorch models with Differential Privacy
 
-[![CircleCI](https://circleci.com/gh/facebookresearch/pytorch-dp.svg?style=svg&circle-token=247aedbb579492ef94652ea93bbee4e169457795)](https://circleci.com/gh/facebookresearch/pytorch-dp)
+Main build: [![facebookresearch](https://circleci.com/gh/facebookresearch/pytorch-dp.svg?style=svg&circle-token=247aedbb579492ef94652ea93bbee4e169457795)](https://circleci.com/gh/facebookresearch/pytorch-dp)
+
+Release build: [![facebookresearch](https://circleci.com/gh/facebookresearch/pytorch-dp/tree/v0.1-beta.1.svg?style=svg&circle-token=247aedbb579492ef94652ea93bbee4e169457795)](https://circleci.com/gh/facebookresearch/pytorch-dp/tree/v0.1-beta.1) (v0.1-beta.1)
 
 pytorch-dp is a library that enables training PyTorch models with differential privacy. It supports training with minimal code changes required on the client, has little impact on training performance and allows the client to online track the privacy budget expended at any given moment.
 
-*PyTorch Privacy is currently a preview beta and under active development!*
+*PyTorch-DP is currently a preview beta and under active development!*
 
 ### Target audience
 This code release is aimed at two target audiences:
@@ -13,8 +15,12 @@ This code release is aimed at two target audiences:
 
 
 ## Installation
-Currently, we only supporting installing from source. To do that, just run:
+pip:
+```bash
+pip install pytorch-dp
+```
 
+From source:
 ```bash
 git clone https://github.com/facebookresearch/pytorch-dp.git
 cd pytorch-dp
