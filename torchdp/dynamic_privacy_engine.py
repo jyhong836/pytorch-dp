@@ -78,24 +78,36 @@ class ValDecaySch(NoiseScheduler):
         self.delta = 0.01
         self.period = 10
         self.epoch = 0
+        self.val_epoch = 0
 
-    def __call__(self, t, initial_noise_multiplier=10., k=0.01, period=10, **param_dict):
-        if self.stat["noise_multiplier"] is None:
+    def __call__(self, t, initial_noise_multiplier=10., k=0.01, period=10, m=5, **param_dict):
+        if param_dict["batch_type"] == "shuffle":
+            # t and i_epoch both start from 0.
+            # index of current epoch.
+            self.epoch = np.floor(t * param_dict['sample_rate'])
+            # print(f"### epch: {self.epoch} sample rate: {param_dict['sample_rate']}")
+        if t == 0 or self.stat["noise_multiplier"] is None:
+            # reset at the beginning.
             self.stat["noise_multiplier"] = initial_noise_multiplier
             self.initial_noise_multiplier = initial_noise_multiplier
             self.k = k
+            self.m = m
             self.period = period
         return self.stat["noise_multiplier"]
 
     def update_stat(self, stat):
-        if self.epoch % self.period == 0:
-            if self.stat["val_acc"] is None:
-                self.stat["val_acc"] = stat["val_acc"]
-            else:
-                if stat["val_acc"] - self.stat["val_acc"] < self.delta:
-                    self.stat["noise_multiplier"] *= (1 - self.k)
-                self.stat["val_acc"] = stat["val_acc"]
-        self.epoch += 1
+        assert self.period >= self.m, f"period has to be >= m while period is {self.period}, " \
+                                      f"m is {self.m}"
+        if self.val_epoch == 0:
+            self.stat["val_acc"] = []
+        self.stat["val_acc"].append(stat["val_acc"])
+        self.val_epoch += 1
+
+        if self.val_epoch > 0 and self.val_epoch % self.period == 0 and self.val_epoch > self.period:
+            S_e = np.mean(self.stat["val_acc"][-self.m:])
+            S_e1 = np.mean(self.stat["val_acc"][-self.period-self.m:-self.period])
+            if S_e - S_e1 < self.delta:
+                self.stat["noise_multiplier"] *= self.k
 
 
 class DynamicPrivacyEngine(PrivacyEngine):
