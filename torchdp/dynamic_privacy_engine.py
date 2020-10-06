@@ -105,7 +105,7 @@ class DynamicPrivacyEngine(PrivacyEngine):
         super(DynamicPrivacyEngine, self).__init__(module, batch_size, sample_size, alphas, initial_noise_multiplier,
                                                    max_grad_norm, grad_norm_type, batch_first,
                                                    privacy_budget=privacy_budget, batch_type=batch_type,
-                                                   layer_wise_clip=layer_wise_clip)
+                                                   clip_per_layer=layer_wise_clip)
         self.step_noise_multipliers = []
         self.accumulated_rdp = None
         if dynamic_sch_func is None:
