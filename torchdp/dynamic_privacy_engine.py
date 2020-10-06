@@ -8,6 +8,7 @@ from . import privacy_analysis as tf_privacy
 from .privacy_engine import PrivacyEngine
 from .utils import stats
 
+
 class NoiseScheduler(object):
     def __init__(self):
         self.stat = {}
@@ -27,6 +28,26 @@ class PredefinedSch(NoiseScheduler):
 
     def __call__(self, t, **param_dict):
         return self._sigmas[int(t*self.sample_rate)]
+
+
+class TimeDecaySch(NoiseScheduler):
+    def __call__(self, t, initial_noise_multiplier=10., k=0.05, **param_dict):
+        if param_dict["batch_type"] == "shuffle":
+            # t and i_epoch both start from 0.
+            # index of current epoch.
+            t = np.floor(t * param_dict['sample_rate'])
+        return initial_noise_multiplier / (1. + k * t)
+
+
+class PolyDecaySch(NoiseScheduler):
+    def __call__(self, t, initial_noise_multiplier=10., final_noise_multiplier=2., k=3.,
+                 period=100., **param_dict):
+        if param_dict["batch_type"] == "shuffle":
+            # t and i_epoch both start from 0.
+            # index of current epoch.
+            t = np.floor(t * param_dict['sample_rate'])
+        return (initial_noise_multiplier - final_noise_multiplier) * (1 - float(t) / period) ** k \
+            + final_noise_multiplier
 
 
 class ExpDecaySch(NoiseScheduler):
