@@ -361,6 +361,17 @@ def get_privacy_spent(
 
     idx_opt = np.nanargmin(eps)  # Ignore NaNs
     if idx_opt == 0 or idx_opt == len(eps) - 1:
-        raise ValueError(f"The range of rdp orders is improper. The minimum "
-                         f"is found on the boundary.")
+        if idx_opt == 0:
+            opt_order = orders_vec[idx_opt]
+            orders = orders[:5]
+            eps = eps[:5]
+        else:
+            opt_order = orders_vec[idx_opt]
+            orders = orders[-5:]
+            eps = eps[-5:]
+        msg = f"The range of rdp orders is improper. The minimum "\
+              f"is found on the boundary. Optimal order: {opt_order} "\
+              f"at index {idx_opt}. Boundary orders: {orders}. Values"\
+              f" of the eps: {eps}"
+        raise ValueError(msg)
     return eps[idx_opt], orders_vec[idx_opt]
