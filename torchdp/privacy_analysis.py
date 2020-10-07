@@ -340,6 +340,8 @@ def get_privacy_spent(
     ------
     ValueError
         If the lengths of ``orders`` and ``rdp`` are not equal.
+        If the minimum is found on the boundary. Then the range of
+        orders should be extended
     """
     orders_vec = np.atleast_1d(orders)
     rdp_vec = np.atleast_1d(rdp)
@@ -358,4 +360,7 @@ def get_privacy_spent(
         return np.inf, np.nan
 
     idx_opt = np.nanargmin(eps)  # Ignore NaNs
+    if idx_opt == 0 or idx_opt == len(eps) - 1:
+        raise ValueError(f"The range of rdp orders is improper. The minimum "
+                         f"is found on the boundary.")
     return eps[idx_opt], orders_vec[idx_opt]
