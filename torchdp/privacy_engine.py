@@ -123,7 +123,7 @@ class PrivacyEngine:
             self.module, norm_clipper, self.batch_first
         )
 
-        def dp_step(self, closure=None):
+        def dp_step(self, *args, closure=None):
             if closure is not None:
                 _closure = closure
                 def private_closure():
@@ -133,7 +133,7 @@ class PrivacyEngine:
                 closure = private_closure
             else:
                 self.privacy_engine.step()
-            self.original_step(closure)
+            return self.original_step(*args, closure)
 
         # pyre-fixme[16]: `Optimizer` has no attribute `privacy_engine`.
         optimizer.privacy_engine = self
