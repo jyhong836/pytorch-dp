@@ -78,7 +78,16 @@ class PrivacyEngine:
         optim = self.optimizer
         optim.privacy_engine = None
         self.clipper.close()
-        optim.step = types.MethodType(optim.original_step, optim)
+        # # official code:
+        # optim.step = types.MethodType(optim.original_step, optim)  # this will result in error.
+
+        # # optional implementation
+        # def org_step(self, *args, **kwargs):
+        #     return self.original_step(*args, **kwargs)
+        # optim.step = types.MethodType(org_step, optim)
+
+        # easy implementation
+        optim.step = optim.original_step
         del optim.virtual_step
 
     def attach(self, optimizer: torch.optim.Optimizer):
